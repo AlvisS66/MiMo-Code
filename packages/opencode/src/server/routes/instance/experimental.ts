@@ -64,7 +64,7 @@ const GenTitleBody = z
     }, 0)
     if (imageBytes > 8 * 1024 * 1024) ctx.addIssue({ code: "custom", message: "images exceed the 8 MiB total limit" })
   })
-const GenTitleResult = z.object({ title: z.string(), status: z.enum(["generated", "fallback", "untitled"]) })
+const GenTitleResult = z.object({ title: z.string(), status: z.enum(["generated", "salvaged", "fallback", "untitled"]) })
 const GenTitleRequestBody = {
   required: true,
   content: { "application/json": { schema: z.toJSONSchema(GenTitleBody, { io: "input" }) } },

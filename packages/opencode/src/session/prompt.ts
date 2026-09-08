@@ -350,6 +350,25 @@ export function sanitizeGeneratedTitle(value: string) {
   return line
 }
 
+// Recover a title from a StructuredOutput args stream that failed schema
+// validation (e.g. gateway-mangled JSON: truncated args, or internal-markup
+// leakage such as ｜DSML｜ tokens spliced into the value). Only digs the
+// candidate out — the caller still routes it through sanitizeGeneratedTitle.
+export function salvageTitleFromArgs(raw: string) {
+  // Stop at the first unescaped quote or end-of-string, so both a well-formed
+  // and a truncated value match; the latter when the stream was cut off.
+  const match = /"title"\s*:\s*"((?:[^"\\]|\\.)*)/u.exec(raw)
+  // An unterminated value corrupted by leaked internal markup ends at the
+  // "<｜" boundary — a legit title never contains that sequence.
+  const value = match?.[1]?.replace(/<\/?｜[\s\S]*$/u, "")
+  if (!value) return undefined
+  return value
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\")
+}
+
 const PREDICT_SYSTEM = `You predict the single most likely next message a user will send to a coding assistant, based on the conversation so far. Output only that next message as one short, natural first-person request (what the user would type). No preamble, no quotes, no explanation, no markdown. Keep it under 100 characters.`
 
 const PREDICT_NUDGE = `Based on the conversation above, write the user's most likely next message:`
@@ -421,7 +440,7 @@ export interface Interface {
   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
-  readonly genTitle: (input: { text?: string; parts?: GenTitlePart[]; locale?: string; sessionID?: SessionID; providerID?: ProviderID; model?: { providerID: ProviderID; modelID: ModelID } }) => Effect.Effect<{ title: string; status: "generated" | "fallback" | "untitled" }>
+  readonly genTitle: (input: { text?: string; parts?: GenTitlePart[]; locale?: string; sessionID?: SessionID; providerID?: ProviderID; model?: { providerID: ProviderID; modelID: ModelID } }) => Effect.Effect<{ title: string; status: "generated" | "salvaged" | "fallback" | "untitled" }>
   readonly sweepOrphanAssistants: (sessionID: SessionID, immediate?: boolean) => Effect.Effect<void>
   readonly sweepOrphanToolParts: (sessionID: SessionID) => Effect.Effect<void>
   readonly predict: (input: { sessionID: SessionID }) => Effect.Effect<string>
@@ -1007,10 +1026,30 @@ export const layer = Layer.effect(
           messages: [{ role: "user", content: titlePromptText(text, input.locale) }],
         }).pipe(Stream.runCollect)
         if (events.some(event => event.type === "abort" || ((event.type === "error" || event.type === "tool-error") && event.error instanceof Error && event.error.name === "AbortError"))) return yield* Effect.interrupt
-        if (events.some(event => event.type === "error" || event.type === "tool-error" || (event.type === "tool-call" && event.toolName !== "StructuredOutput"))) return undefined
+        // Salvage material, collected before schema validation discards it: the
+        // raw tool-args stream (tool-input-delta) survives mangled JSON, and the
+        // prose stream (text-delta) survives gateways that ignore tool_choice.
+        let prose = ""
+        let argsTail = ""
+        for (const event of events) {
+          if (event.type === "text-delta") prose += event.text
+          if (event.type === "tool-input-delta") argsTail += event.delta
+        }
+        const salvage = Effect.fnUntraced(function* () {
+          // Degraded model output: recover the title from the mangled args stream
+          // or the prose reply before giving up on the LLM entirely.
+          const recovered = sanitizeGeneratedTitle(salvageTitleFromArgs(argsTail) ?? prose)
+          if (!recovered) {
+            yield* elog.warn("title degraded to first-line fallback", { hasProse: prose.trim().length > 0, argsTail: argsTail.slice(0, 80) })
+            return undefined
+          }
+          yield* elog.warn("title recovered from degraded model output", { argsTail: argsTail.slice(0, 80) })
+          return { title: truncateTitle(recovered), status: "salvaged" as const }
+        })
+        if (events.some(event => event.type === "error" || event.type === "tool-error" || (event.type === "tool-call" && event.toolName !== "StructuredOutput"))) return yield* salvage()
         const result = candidate
         const raw = result && typeof result === "object" ? (result as Record<string, unknown>).title : undefined
-        if (typeof raw !== "string") return undefined
+        if (typeof raw !== "string") return yield* salvage()
         const title = sanitizeGeneratedTitle(raw)
         if (!title || title.startsWith("{") || title.startsWith("[") || /<\/?system-reminder>/i.test(title) || !/\p{L}/u.test(title)) return undefined
         return { title: truncateTitle(title), status: "generated" as const }

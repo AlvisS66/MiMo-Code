@@ -4572,7 +4572,7 @@ export type ExperimentalTitleGenerateResponses = {
    */
   200: {
     title: string
-    status: "generated" | "fallback" | "untitled"
+    status: "generated" | "salvaged" | "fallback" | "untitled"
   }
 }
 
