@@ -1099,7 +1099,7 @@ export const layer = Layer.effect(
       if (current.titleSource !== "fallback" || current.titleRevision !== input.session.titleRevision + 1 || !normalized.canGenerate) return
       yield* Effect.gen(function* () {
         const result = yield* genTitle({ text: normalized.text, locale: input.titleLocale, sessionID: current.id, model: firstUser?.info.role === "user" ? firstUser.info.model : input.model })
-        if (result.status !== "generated") return
+        if (result.status !== "generated" && result.status !== "salvaged") return
         yield* sessions.setTitleIfDefault({ sessionID: current.id, title: result.title, expectedRevision: current.titleRevision })
       }).pipe(Effect.catchCause((cause) => elog.warn("auto title generation failed", { error: Cause.squash(cause) })), Effect.forkDetach({ startImmediately: true }))
     })
