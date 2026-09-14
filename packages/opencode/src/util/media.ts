@@ -22,6 +22,49 @@ export function isImageAttachment(mime: string) {
   return mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/vnd.fastbidsheet"
 }
 
+// Finite allowlists for the read tool. Prefix matching is unsafe: mime-types
+// maps code extensions such as .ts/.mts to video/mp2t. Deliberately narrower
+// than the full MiMo API surface — only the familiar formats the agent is
+// expected to attach. Unknown media MIMEs never enter an attachment branch.
+export const READ_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"])
+export const READ_PDF_MIMES = new Set(["application/pdf"])
+export const READ_AUDIO_MIMES = new Set(["audio/wav", "audio/x-wav", "audio/mp3", "audio/mpeg"])
+export const READ_VIDEO_MIMES = new Set(["video/mp4"])
+
+export function isReadImageMime(mime: string) {
+  return READ_IMAGE_MIMES.has(mime)
+}
+
+export function isReadPdfMime(mime: string) {
+  return READ_PDF_MIMES.has(mime)
+}
+
+export function isReadAudioMime(mime: string) {
+  return READ_AUDIO_MIMES.has(mime)
+}
+
+export function isReadVideoMime(mime: string) {
+  return READ_VIDEO_MIMES.has(mime)
+}
+
+export function isReadAttachmentMime(mime: string) {
+  return isReadImageMime(mime) || isReadPdfMime(mime) || isReadAudioMime(mime) || isReadVideoMime(mime)
+}
+
+// Prefix media-likeness, for "outside the finite list but still looks like
+// media" messaging only. Never use this to decide a successful attach.
+export function looksLikeMediaMime(mime: string) {
+  return mime.startsWith("image/") || isAudioAttachment(mime) || isVideoAttachment(mime) || isPdfAttachment(mime)
+}
+
+export function readMimeAllowlist(mime: string): ReadonlySet<string> | undefined {
+  if (isReadImageMime(mime) || mime.startsWith("image/")) return READ_IMAGE_MIMES
+  if (isReadAudioMime(mime) || mime.startsWith("audio/")) return READ_AUDIO_MIMES
+  if (isReadVideoMime(mime) || mime.startsWith("video/")) return READ_VIDEO_MIMES
+  if (isPdfAttachment(mime)) return READ_PDF_MIMES
+  return undefined
+}
+
 // Inline audio/video is sent as a `data:{mime};base64,...` string, and the
 // provider bounds the ENCODED string (50 MB for both the MiMo audio and video
 // APIs), not the decoded bytes. Base64 grows the payload by 4/3, so a file must

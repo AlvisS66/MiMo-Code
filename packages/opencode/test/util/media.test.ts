@@ -3,7 +3,14 @@ import {
   base64Length,
   fitsMediaBase64,
   isMedia,
+  isReadAttachmentMime,
+  isReadAudioMime,
+  isReadImageMime,
+  isReadPdfMime,
+  isReadVideoMime,
+  looksLikeMediaMime,
   MAX_MEDIA_BASE64_BYTES,
+  readMimeAllowlist,
   sniffAttachmentMime,
 } from "../../src/util/media"
 
@@ -29,5 +36,37 @@ describe("util.media", () => {
     expect(sniffAttachmentMime(wav, "application/octet-stream")).toBe("audio/wav")
     const webp = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")])
     expect(sniffAttachmentMime(webp, "application/octet-stream")).toBe("image/webp")
+  })
+
+  test("finite read allowlist accepts only familiar formats", () => {
+    expect(isReadImageMime("image/jpeg")).toBe(true)
+    expect(isReadImageMime("image/png")).toBe(true)
+    expect(isReadImageMime("image/webp")).toBe(true)
+    expect(isReadImageMime("image/gif")).toBe(true)
+    expect(isReadImageMime("image/bmp")).toBe(false)
+    expect(isReadImageMime("image/svg+xml")).toBe(false)
+
+    expect(isReadAudioMime("audio/wav")).toBe(true)
+    expect(isReadAudioMime("audio/mpeg")).toBe(true)
+    expect(isReadAudioMime("audio/flac")).toBe(false)
+    expect(isReadAudioMime("audio/m4a")).toBe(false)
+
+    expect(isReadVideoMime("video/mp4")).toBe(true)
+    expect(isReadVideoMime("video/quicktime")).toBe(false)
+    expect(isReadVideoMime("video/webm")).toBe(false)
+    expect(isReadVideoMime("video/mp2t")).toBe(false)
+
+    expect(isReadPdfMime("application/pdf")).toBe(true)
+    expect(isReadAttachmentMime("video/mp2t")).toBe(false)
+    expect(isReadAttachmentMime("image/png")).toBe(true)
+  })
+
+  test("prefix media-likeness does not imply attachable", () => {
+    expect(looksLikeMediaMime("video/mp2t")).toBe(true)
+    expect(isReadVideoMime("video/mp2t")).toBe(false)
+    expect(looksLikeMediaMime("image/bmp")).toBe(true)
+    expect(isReadImageMime("image/bmp")).toBe(false)
+    expect(readMimeAllowlist("video/mp2t")).toContain("video/mp4")
+    expect(readMimeAllowlist("text/plain")).toBeUndefined()
   })
 })
