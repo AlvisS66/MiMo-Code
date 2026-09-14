@@ -3,7 +3,7 @@ feature: memory-prompt-decouple
 status: delivered
 updated: 2026-09-14
 branch: feat/memory-prompt-decouple
-commits: pending
+commits: e485a2a..9780b2e
 ---
 
 # Memory Prompt Decouple From Checkpoint
