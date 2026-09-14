@@ -22,9 +22,10 @@ commits: e485a2a5e096a077e381e6df56c332d8150629ae..99a5f9eb19c6c14323271f3b4b5f4
 **Journey log** —
 1. The gate was introduced in `cb633947` (PR #1243) to turn edit.txt usage notes into RecoverableError enforcement for existing-file edits.
 2. Enforcement never covered `write`/`apply_patch`; `write.txt` still claimed hard failure that the tool never implemented — docs were ahead of code.
-3. Real agent friction (bash-as-read, main-worktree read + linked-worktree edit absolute-path mismatch) made the gate a turn tax without protecting integrity: `edit` still exact-matches current disk contents.
+3. Real agent friction (bash-as-read, main-worktree read + linked-worktree edit absolute-path mismatch, self-written files not counting as read) made the gate a turn tax without protecting integrity: `edit` still exact-matches current disk contents.
 4. Impact surface was small: two call sites, one 44-line module, three tool .txt lines, one prompt phrase, and no dedicated unit tests for the gate itself.
 5. This session's own Edit tool still enforced the desktop read-before-edit rule when patching worktree `.txt` files after only reading main-worktree copies — the path-mismatch problem reproduced live during implementation.
+6. Confirmed on base `e485a2a5`: `read-state.ts` only matches `part.tool === "read"`; `write.ts` and the create branch of `edit` never record a read. Self-write → later edit is a guaranteed false negative.
 
 ## [S1] Problem
 
@@ -33,6 +34,7 @@ commits: e485a2a5e096a077e381e6df56c332d8150629ae..99a5f9eb19c6c14323271f3b4b5f4
 1. Models increasingly inspect files via bash (`cat` / `sed` / `python`), which never records a `read` tool part, so the subsequent `edit` fails with a recoverable error and burns a turn.
 2. Agents that read a path in the main worktree and then edit the same logical file inside their own worktree hit a path mismatch — `canon()` compares absolute paths, so the gate rejects a legitimate edit.
 3. Compaction / history loss can drop the original `read` parts, re-triggering the gate on a file the model has already seen.
+4. Self-authored files never count as read. `assertFileRead` only accepts completed `tool === "read"` parts; neither `write` nor `edit` (including `old_string=""` create) synthesizes a read-state entry. So `write` then `edit`, or multiedit's create-then-patch sequence on the same path, still trips the gate on the second step — even though the model just produced that content.
 
 The gate does not protect file integrity: `edit` still loads current disk contents and exact-matches `old_string` before writing. `write` documents the same rule but never enforces it; `apply_patch` has no gate. The hard check is inconsistent, easy to bypass via bash, and hostile to worktree workflows.
 
