@@ -135,3 +135,26 @@ user: "Find all places where parser.ts handles error recovery"
 assistant: I'll spawn an explore subagent in the background to scan parser-related files.
 [actor({"operation":{"action":"spawn","subagent_type":"explore","description":"Find error recovery in parser","prompt":"Search src/parser.ts and adjacent files for error-recovery patterns. Return: each location's file:line + a one-sentence description of how it recovers. If you find catch blocks, panic-mode synchronization, or recovery sentinels, list them all."}})]
 </example>
+
+<example>
+user: "Audit the type checker: spec compliance, test coverage, and perf hot spots"
+assistant: Three independent questions — I'll spawn all three at once so they run in parallel, then collect.
+[actor({"operation":{"action":"spawn","subagent_type":"general","description":"Type checker spec review","prompt":"Read docs/spec.md §3 (Type System), then src/types.ts. Report every §3 requirement not implemented. Don't fix anything."}})]
+[actor({"operation":{"action":"spawn","subagent_type":"general","description":"Type checker coverage gaps","prompt":"Read docs/spec.md §3 and tests/types.test.ts. Report every §3 requirement with no test covering it. Don't fix anything."}})]
+[actor({"operation":{"action":"spawn","subagent_type":"explore","description":"Type checker hot spots","prompt":"Find the hottest loops and repeated allocations in src/types.ts. Report file:line + why it's hot."}})]
+assistant: All three are running. I'll fold their results in as they report; if I need them before then I'll `wait` on each actor_id.
+</example>
+
+<example>
+user: "investigate T4's failing tests in the type checker"
+assistant: T4 is an active task in my tracker. I'll spawn an explore subagent bound to T4 so its findings end up in tasks/T4/progress.md.
+[actor({"operation":{"action":"spawn","subagent_type":"explore","description":"Investigate T4 type checker failures","prompt":"Run `bun test src/types.test.ts` and report each failing case. For each failure: file:line of the assertion, the expected vs actual values, and the most likely root-cause hypothesis based on reading src/types.ts. Don't fix anything.","task_id":"T4"}})]
+</example>
+
+<example>
+THE EXCEPTION — `run` blocks the conversation, so only for a tiny lookup whose answer
+gates your very next decision in this same turn.
+user: "Rename the config field everywhere — but only if it isn't part of the public API"
+assistant: I can't pick between a rename and a deprecation shim until I know whether the field is exported. That's a one-shot blocking lookup, so I'll use `run`.
+[actor({"operation":{"action":"run","subagent_type":"explore","description":"Is the field public API","prompt":"Check whether `retryLimit` in src/config.ts is re-exported from src/index.ts or any public entrypoint. Answer yes/no with file:line evidence. Nothing else."}})]
+</example>
