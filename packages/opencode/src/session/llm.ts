@@ -112,19 +112,14 @@ export function isTransientCapacityError(error: unknown): boolean {
 /**
  * Memory-system instructions appended to the main agent's system prompt.
  *
- * Teaches the agent its v8.1 ownership of the memory system:
- * - MEMORY.md (project-scoped): writer is sole curator + agent edits for
- *   project-level user-stated rules
- * - checkpoint.md (session-scoped): writer EXCLUSIVE; agent never edits
- * - tasks/<id>/progress.md: writer-derived splitover from session-level
- *   progress.md; not LLM-written. Subagents handed a task may read but
- *   should not write.
- *
- * Also documents the Active recall protocol that prevents re-Reading
- * files already present in the rebuild dump, and the Subagent return
- * format contract.
- *
- * This block is not appended when `MIMOCODE_DISABLE_CHECKPOINT` is on.
+ * Always injected for main/peer actors (`servesCheckpoint`); memory ownership
+ * is not gated on checkpoint. `MIMOCODE_DISABLE_CHECKPOINT` only drops the
+ * checkpoint-write subsections:
+ * - Always: project MEMORY.md + when the agent may Edit; global MEMORY.md;
+ *   session notes.md scratchpad; subagent return format; search-first /
+ *   no-ad-hoc-files rules.
+ * - When checkpoint is on: checkpoint.md / tasks/<id>/progress.md paths,
+ *   writer-as-curator ownership, Active recall protocol after rebuild dumps.
  *
  * `memoryRoot` is the same absolute root returned by Memory.root(), so these
  * paths match the files used by checkpoint restore and memory/task detection.
@@ -349,15 +344,16 @@ const live: Layer.Layer<
       agentID?: string
       ephemeral?: boolean
     }) {
-      // "Is this a main/peer actor" — the single judgement two sections below key
-      // on (replace-agent base override + memory instructions). Injected only for
-      // actors whose context the checkpoint flow serves — main + peer. Subagents
-      // (explore/general/…) run in the SHARED sessionID (F37 slices) but are NOT
-      // main/peer; system-spawned actors (checkpoint-writer et al.) and ephemeral
-      // one-shots (title gen) likewise are not. Shares the exact `servesCheckpoint`
-      // judgement with SessionPrune.fireCheckpoints so the "who owns a checkpoint"
-      // and "who is taught about it" (and now "who applies the session base") sets
-      // can never drift apart.
+      // "Is this a main/peer actor" — the single judgement memory-instructions
+      // and replace-agent base override share. Memory system is ALWAYS taught to
+      // these actors; only checkpoint-write copy inside the block is
+      // flag-filtered. Injected only for actors whose context the checkpoint
+      // flow serves — main + peer. Subagents (explore/general/…) run in the
+      // SHARED sessionID (F37 slices) but are NOT main/peer; system-spawned
+      // actors (checkpoint-writer et al.) and ephemeral one-shots (title gen)
+      // likewise are not. Shares the exact `servesCheckpoint` judgement with
+      // SessionPrune.fireCheckpoints so "who owns a checkpoint" and "who is
+      // taught about memory" cannot drift apart on the actor axis.
       const servesCheckpoint =
         !input.ephemeral && (yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID))
 
@@ -383,14 +379,15 @@ const live: Layer.Layer<
           .join("\n"),
       )
 
-      // v5: memory-instructions section. Teaches the agent how/where/when to
-      // maintain `MEMORY.md` and (when checkpointing is on) `checkpoint.md`.
-      // Project ID is resolved from the ALS-bound Instance with a safe fallback
-      // to `ProjectID.global` (mirrors the pattern in session/checkpoint.ts so the
-      // path the prompt advertises matches the path the writer actually writes).
-      // Gated on the shared `servesCheckpoint` judgement above; disabling
-      // checkpoints also disables this memory-system prompt block.
-      if (servesCheckpoint && !Flag.MIMOCODE_DISABLE_CHECKPOINT) {
+      // Memory-instructions section. Always injected for main/peer actors —
+      // memory paths/ownership are independent of checkpoint. The checkpoint
+      // flag only narrows which subsections buildMemoryInstructions emits
+      // (writer/ckpt/Active-recall extras). Project ID is resolved from the
+      // ALS-bound Instance with a safe fallback to `ProjectID.global`
+      // (mirrors session/checkpoint.ts so advertised paths match writer
+      // paths). system-spawned actors (checkpoint-writer et al.) stay out via
+      // servesCheckpoint.
+      if (servesCheckpoint) {
         const projectID =
           (yield* Effect.try({
             try: () => Instance.current?.project?.id as ProjectID | undefined,
