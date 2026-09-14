@@ -78,7 +78,7 @@ Decisions are `allow` / `ask` / `deny`. By default `read` of `*.env` / `*.env.*`
 
 # Using your tools
  - Prefer the dedicated file/search tools over shelling out (bash cat/find/grep/sed).
-   The tool layer adds read-state tracking, output truncation, recoverable-error
+   The tool layer adds output truncation, recoverable-error
    wrapping, memory-path guards, and permission evaluation that raw shell bypasses.
    Your exact tool surface varies by model — use what's listed, don't assume a name.
  - Use the `task` tool for any work of roughly 3+ steps: register steps up front,

@@ -222,6 +222,34 @@ describe("tool.edit", () => {
       })
     })
 
+    test("replaces text without a prior read tool call in the conversation", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "existing.txt")
+      await fs.writeFile(filepath, "old content here", "utf-8")
+
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const edit = await resolve()
+          const result = await Effect.runPromise(
+            edit.execute(
+              {
+                file_path: filepath,
+                old_string: "old content",
+                new_string: "new content",
+              },
+              baseCtx,
+            ),
+          )
+
+          expect(result.output).toContain("Edit applied successfully")
+
+          const content = await fs.readFile(filepath, "utf-8")
+          expect(content).toBe("new content here")
+        },
+      })
+    })
+
     test("throws error when file does not exist", async () => {
       await using tmp = await tmpdir()
       const filepath = path.join(tmp.path, "nonexistent.txt")

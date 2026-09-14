@@ -11,7 +11,6 @@ import { FileWatcher } from "../file/watcher"
 import { Instance } from "../project/instance"
 import { SessionCwd } from "./session-cwd"
 import { assertWriteAllowed, askEditUnlessMemory } from "./external-directory"
-import { assertFileRead } from "./read-state"
 import { trimDiff } from "./edit"
 
 const Parameters = z.object({
@@ -116,7 +115,6 @@ export const NotebookEditTool = Tool.define(
           }
 
           yield* assertWriteAllowed(ctx, notebookPath)
-          assertFileRead(ctx, notebookPath, "notebook_edit")
 
           const exists = yield* fs.existsSafe(notebookPath)
           if (!exists) throw new Error(`Notebook not found: ${notebookPath}`)
