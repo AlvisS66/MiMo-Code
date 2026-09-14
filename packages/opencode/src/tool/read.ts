@@ -17,62 +17,49 @@ import { builtinSkillRoot } from "@/skill/builtin/extract"
 import {
   classifyAttachment,
   fitsMediaBase64,
-  isAudioAttachment,
-  isImageAttachment,
-  isPdfAttachment,
-  isVideoAttachment,
+  isReadAudioMime,
+  isReadImageMime,
+  isReadPdfMime,
+  isReadVideoMime,
+  looksLikeMediaMime,
   oversizedAttachmentNotice,
   oversizedMediaNotice,
+  READ_AUDIO_MIMES,
+  READ_VIDEO_MIMES,
+  readMimeAllowlist,
   sniffAttachmentMime,
 } from "@/util/media"
 
 const DEFAULT_READ_LIMIT = 2000
 
-// Formats the MiMo audio/video APIs document, keyed by the MIME the adapter
-// declaration lists (see capability-registry.ts) so the description names only
-// what the current model+adapter can actually take.
+// Format names for the finite read allowlists — what describeMedia advertises
+// and what the attachment branch will actually attach.
 const AUDIO_FORMAT_NAMES: Record<string, string> = {
   "audio/wav": "wav",
   "audio/x-wav": "wav",
   "audio/mp3": "mp3",
   "audio/mpeg": "mp3",
-  "audio/flac": "flac",
-  "audio/x-flac": "flac",
-  "audio/mp4": "m4a",
-  "audio/m4a": "m4a",
-  "audio/x-m4a": "m4a",
-  "audio/ogg": "ogg",
 }
-const AUDIO_FORMATS = ["wav", "mp3", "flac", "m4a", "ogg"]
 const VIDEO_FORMAT_NAMES: Record<string, string> = {
   "video/mp4": "mp4",
-  "video/quicktime": "mov",
-  "video/x-msvideo": "avi",
-  "video/x-ms-wmv": "wmv",
 }
-const VIDEO_FORMATS = ["mp4", "mov", "avi", "wmv"]
 
-// The format names the current model+adapter can take for one media kind:
-// the adapter declaration's MIME list when it has one, else the documented
-// MiMo API formats.
-function mediaFormatNames(model: Provider.Model, kind: "audio" | "video") {
-  const declared = ModelCapability.modelDeclaration(model, kind)
+function mediaFormatNames(kind: "audio" | "video") {
   const names = kind === "audio" ? AUDIO_FORMAT_NAMES : VIDEO_FORMAT_NAMES
-  const fallback = kind === "audio" ? AUDIO_FORMATS : VIDEO_FORMATS
-  return declared.support === "supported" && declared.mimeTypes !== "any"
-    ? [...new Set(declared.mimeTypes.map((mime) => names[mime] ?? mime))]
-    : fallback
+  const mimes = kind === "audio" ? READ_AUDIO_MIMES : READ_VIDEO_MIMES
+  return [...new Set([...mimes].map((mime) => names[mime] ?? mime))]
 }
 
 /**
  * The audio/video paragraph of the tool description, or undefined when the
  * model accepts neither. Appended per model by the tool registry so a
- * text-only model is never told it can attach media.
+ * text-only model is never told it can attach media. Formats listed are the
+ * finite read allowlist, not the full adapter surface.
  */
 export function describeMedia(model: Provider.Model | undefined) {
   if (!model) return undefined
-  const audio = model.capabilities.input.audio ? `audio (${mediaFormatNames(model, "audio").join(", ")})` : undefined
-  const video = model.capabilities.input.video ? `video (${mediaFormatNames(model, "video").join(", ")})` : undefined
+  const audio = model.capabilities.input.audio ? `audio (${mediaFormatNames("audio").join(", ")})` : undefined
+  const video = model.capabilities.input.video ? `video (${mediaFormatNames("video").join(", ")})` : undefined
   const kinds = [audio, video].filter((kind): kind is string => kind !== undefined)
   if (kinds.length === 0) return undefined
   return [
@@ -275,14 +262,39 @@ export const ReadTool = Tool.define(
       const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
 
       const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
+      // Finite allowlist only. mime-types maps code extensions such as .ts/.mts
+      // to video/mp2t; prefix matching must not send source files down the
+      // media path. Outside the list: binary media-like files still refuse with
+      // a convert hint; text-like payloads fall through to the text reader.
+      const inImage = isReadImageMime(mime)
+      const inPdf = isReadPdfMime(mime)
+      const inAudio = isReadAudioMime(mime)
+      const inVideo = isReadVideoMime(mime)
+      const inMedia = inImage || inPdf || inAudio || inVideo
+
+      if (!inMedia && looksLikeMediaMime(mime) && isBinaryFile(filepath, sample)) {
+        const allowlist = readMimeAllowlist(mime)
+        const kind = mime.startsWith("audio/") ? "audio" : mime.startsWith("video/") ? "video" : mime === "application/pdf" ? "PDF" : "image"
+        const accepted = allowlist ? [...allowlist].join(", ") : ""
+        const hintExt = kind === "audio" ? "wav" : kind === "video" ? "mp4" : kind === "PDF" ? "pdf" : "png"
+        const warning = [
+          `Cannot attach ${kind} "${path.basename(filepath)}" (${mime}) — read only attaches ${accepted || "a finite media MIME list"}, so the file was not read.`,
+          `Convert it first (e.g. ffmpeg -i "${filepath}" /tmp/example.${hintExt}) and read the converted file.`,
+        ].join("\n")
+        return {
+          title,
+          output: warning,
+          metadata: { preview: warning, truncated: false, loaded: loaded.map((item) => item.filepath) },
+        }
+      }
+
       // Size gate on stat, before any bytes are read (see classifyAttachment):
       // a rejected PDF or image is never read, an oversized image within the
       // source ceiling is read and recompressed below. Either way nothing over
       // the limit becomes base64 or reaches the session DB. Audio and video are
       // not gated here: the provider bounds their ENCODED size, which the media
       // branch below checks with fitsMediaBase64.
-      const verdict =
-        isImageAttachment(mime) || isPdfAttachment(mime) ? classifyAttachment(mime, Number(stat.size)) : "fits"
+      const verdict = inImage || inPdf ? classifyAttachment(mime, Number(stat.size)) : "fits"
       if (verdict === "reject") {
         const warning = oversizedAttachmentNotice({
           label: `"${path.basename(filepath)}" (${mime})`,
@@ -314,7 +326,7 @@ export const ReadTool = Tool.define(
               .pipe(Effect.catchDefect(() => Effect.succeed(undefined)))
           : undefined)
 
-      if (isPdfAttachment(mime) && !(model?.capabilities.input.pdf ?? false)) {
+      if (inPdf && !(model?.capabilities.input.pdf ?? false)) {
         // Same shape as the image gate below: the bytes are never read, so a
         // PDF the model cannot take never becomes base64 and never reaches the
         // session DB. The model is pointed at the bundled pdf skill instead.
@@ -328,7 +340,7 @@ export const ReadTool = Tool.define(
           metadata: { preview: warning, truncated: false, loaded: loaded.map((item) => item.filepath) },
         }
       }
-      if (isImageAttachment(mime)) {
+      if (inImage) {
         const supportsImage = model?.capabilities.input.image ?? false
         if (!supportsImage) {
           const preferred = yield* provider.getVisionModel().pipe(Effect.orElseSucceed(() => undefined))
@@ -384,7 +396,7 @@ export const ReadTool = Tool.define(
         }
       }
 
-      if (isPdfAttachment(mime)) {
+      if (inPdf) {
         const bytes = yield* fs.readFile(filepath)
         return {
           title,
@@ -404,12 +416,12 @@ export const ReadTool = Tool.define(
         }
       }
 
-      if (isAudioAttachment(mime) || isVideoAttachment(mime)) {
+      if (inAudio || inVideo) {
         // Audio and video are opaque to the read tool: the bytes go to the model
         // as an inline `data:` attachment, or nowhere. Gate on the model first,
         // then on the encoded size, so a file the model cannot take is never
         // read and an oversized one never becomes base64.
-        const kind = isAudioAttachment(mime) ? "audio" : "video"
+        const kind = inAudio ? "audio" : "video"
         const supported = model?.capabilities.input[kind] ?? false
         if (!supported) {
           const warning = [

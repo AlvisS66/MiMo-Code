@@ -454,7 +454,7 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  it.live("attaches BMP files by sniffed MIME so transform can transcode them", () =>
+  it.live("refuses sniffed BMP under the finite image allowlist", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const rowSize = Math.floor((24 * 1 + 31) / 32) * 4
@@ -470,8 +470,9 @@ describe("tool.read truncation", () => {
       yield* put(path.join(dir, "screenshot.png"), bmp)
 
       const result = yield* exec(dir, { file_path: path.join(dir, "screenshot.png") })
-      expect(result.output).toBe("Image read successfully")
-      expect(result.attachments?.[0].mime).toBe("image/bmp")
+      expect(result.attachments).toBeUndefined()
+      expect(result.output).toContain('Cannot attach image "screenshot.png" (image/bmp)')
+      expect(result.output).toContain("image/jpeg, image/png, image/webp, image/gif")
     }),
   )
 
@@ -631,7 +632,7 @@ describe("tool.read audio and video capability gate", () => {
     }),
   )
 
-  it.live("refuses an audio format the provider adapter cannot serialize", () =>
+  it.live("refuses an audio format outside the finite read allowlist", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       yield* put(path.join(dir, "clip.aac"), Buffer.from("\xff\xf1\0\0\0\0", "binary"))
@@ -644,6 +645,7 @@ describe("tool.read audio and video capability gate", () => {
       expect(result.attachments).toBeUndefined()
       expect(result.output).toContain('Cannot attach audio "clip.aac" (audio/aac)')
       expect(result.output).toContain("audio/wav")
+      expect(result.output).toContain("audio/mpeg")
     }),
   )
 
@@ -667,11 +669,11 @@ describe("tool.read audio and video capability gate", () => {
     }),
   )
 
-  it.live("refuses a video format the MiMo video API does not take", () =>
+  it.live("refuses a video format outside the finite read allowlist", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       // EBML header: what a .webm/.mkv starts with. The mime lookup yields
-      // video/webm from the extension, which is outside mp4/mov/avi/wmv.
+      // video/webm from the extension, which is outside the finite video list.
       yield* put(path.join(dir, "clip.webm"), Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(12)]))
 
       const result = yield* exec(
@@ -681,8 +683,42 @@ describe("tool.read audio and video capability gate", () => {
       )
       expect(result.attachments).toBeUndefined()
       expect(result.output).toContain('Cannot attach video "clip.webm" (video/webm)')
-      expect(result.output).toContain("video/mp4, video/quicktime, video/x-msvideo, video/x-ms-wmv")
+      expect(result.output).toContain("video/mp4")
       expect(result.output).toContain("/tmp/example.mp4")
+    }),
+  )
+
+  it.live("reads TypeScript .ts as text, not as video/mp2t", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const source = 'export const answer = 42\nconsole.log("hello")\n'
+      yield* put(path.join(dir, "mod.ts"), source)
+
+      const result = yield* exec(
+        dir,
+        { file_path: path.join(dir, "mod.ts") },
+        { ...ctx, extra: { model: mediaModel({ video: true }) } },
+      )
+      expect(result.attachments).toBeUndefined()
+      expect(result.output).toContain("export const answer = 42")
+      expect(result.output).not.toContain("Cannot attach video")
+      expect(result.output).not.toContain("video/mp2t")
+    }),
+  )
+
+  it.live("reads TypeScript .mts as text, not as video", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      yield* put(path.join(dir, "feature.mts"), "export const title = 'mts'\n")
+
+      const result = yield* exec(
+        dir,
+        { file_path: path.join(dir, "feature.mts") },
+        { ...ctx, extra: { model: mediaModel({ video: true }) } },
+      )
+      expect(result.attachments).toBeUndefined()
+      expect(result.output).toContain("export const title")
+      expect(result.output).not.toContain("Cannot attach video")
     }),
   )
 })
@@ -707,34 +743,23 @@ describe("tool.read media description", () => {
   it.live("names only the modalities the model accepts", () =>
     Effect.sync(() => {
       const audio = describeMedia(withMedia({ audio: true }))
-      expect(audio).toContain("audio (wav, mp3, flac, m4a, ogg)")
+      expect(audio).toContain("audio (wav, mp3)")
       expect(audio).not.toContain("video")
 
       const video = describeMedia(withMedia({ video: true }))
-      expect(video).toContain("video (mp4, mov, avi, wmv)")
+      expect(video).toContain("video (mp4)")
       expect(video).not.toContain("audio")
 
-      expect(describeMedia(withMedia({ audio: true, video: true }))).toContain(
-        "audio (wav, mp3, flac, m4a, ogg) and video (mp4, mov, avi, wmv)",
-      )
+      expect(describeMedia(withMedia({ audio: true, video: true }))).toContain("audio (wav, mp3) and video (mp4)")
     }),
   )
 
-  it.live("narrows the video formats to what the MiMo video API takes", () =>
+  it.live("names the finite read allowlist even when the adapter accepts more", () =>
     Effect.gen(function* () {
-      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/openai-compatible" }))).toContain(
-        "video (mp4, mov, avi, wmv)",
-      )
-      // An adapter that carries any video/* falls back to the documented list.
-      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/google" }))).toContain("video (mp4, mov, avi, wmv)")
-    }),
-  )
-
-  it.live("narrows the audio formats to what the provider adapter can serialize", () =>
-    Effect.sync(() => {
-      expect(describeMedia(withMedia({ audio: true, npm: "@ai-sdk/openai-compatible" }))).toContain(
-        "audio (wav, mp3, flac, m4a, ogg)",
-      )
+      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/openai-compatible" }))).toContain("video (mp4)")
+      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/google" }))).toContain("video (mp4)")
+      expect(describeMedia(withMedia({ audio: true, npm: "@ai-sdk/openai-compatible" }))).toContain("audio (wav, mp3)")
+      expect(describeMedia(withMedia({ audio: true, npm: "@ai-sdk/google" }))).toContain("audio (wav, mp3)")
     }),
   )
 })
