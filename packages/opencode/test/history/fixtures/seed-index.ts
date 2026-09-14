@@ -1,29 +1,25 @@
-import { Context, Effect, Layer } from "effect"
+// Test-only full index builder. Never used at startup.
+import { Effect } from "effect"
 import { and, asc, desc, eq, gt, sql } from "drizzle-orm"
-import { Database } from "../storage"
-import { Config } from "../config"
-import { PartTable, SessionTable } from "../session/session.sql"
-import { HistoryFtsTable } from "./fts.sql"
-import { extract, DEFAULT_KINDS, type Kind } from "./extract"
-import { makeResolver, type Resolver } from "./resolve"
-import { projection } from "./projection"
-import { Log } from "../util"
-import type { MessageV2 } from "../session/message-v2"
+import { Database } from "../../../src/storage"
+import { PartTable, SessionTable } from "../../../src/session/session.sql"
+import { HistoryFtsTable } from "../../../src/history/fts.sql"
+import { extract } from "../../../src/history/extract"
+import { projection } from "../../../src/history/projection"
+import { Log } from "../../../src/util"
+import type { MessageV2 } from "../../../src/session/message-v2"
 
 const log = Log.create({ service: "history.backfill" })
 
 const BATCH = 500
 
 /**
- * Walk PartTable newest-session-first with the given enabled kinds.
+ * Walk PartTable newest-session-first.
  * Idempotent — re-running skips already-indexed parts via NOT EXISTS.
- * Exposed for tests so callers can pass a pre-resolved enabled set.
  */
-export function backfillAll(enabled: ReadonlySet<Kind> = new Set(DEFAULT_KINDS)) {
+export function backfillAll() {
   return Effect.gen(function* () {
-    if (enabled.size === 0) return
-
-    const resolver = makeResolver()
+    let failed = false
     const sessions = Database.use((db) =>
       db
         .select({ id: SessionTable.id, project_id: SessionTable.project_id })
@@ -33,31 +29,28 @@ export function backfillAll(enabled: ReadonlySet<Kind> = new Set(DEFAULT_KINDS))
     )
 
     for (const session of sessions) {
-      yield* scanSession(session, resolver, enabled).pipe(
+      yield* scanSession(session).pipe(
         Effect.catchCause((cause) =>
-          Effect.sync(() => log.warn("session scan failed", { session: session.id, cause: String(cause) })),
+          Effect.sync(() => {
+            failed = true
+            log.warn("session scan failed", { session: session.id, cause: String(cause) })
+          }),
         ),
       )
       yield* Effect.sleep("50 millis")
     }
-    log.info("backfill complete", { sessions: sessions.length })
+    log.info("backfill complete", { sessions: sessions.length, failed })
+    return !failed
   })
 }
 
-function scanSession(session: { id: string; project_id: string }, resolver: Resolver, enabled: ReadonlySet<Kind>) {
+function scanSession(session: { id: string; project_id: string }) {
   return Effect.gen(function* () {
     let cursor = ""
     while (true) {
       const parts = Database.use((db) =>
         db
-          .select(
-            projection(
-              enabled.has("tool_output"),
-              enabled.has("tool_error"),
-              enabled.has("reasoning"),
-              enabled.has("user_text") || enabled.has("assistant_text"),
-            ),
-          )
+          .select(projection())
           .from(PartTable)
           .where(
             and(
@@ -72,7 +65,7 @@ function scanSession(session: { id: string; project_id: string }, resolver: Reso
       )
       if (parts.length === 0) return
 
-      yield* writeBatch(parts, session.project_id, resolver, enabled)
+      yield* writeBatch(parts, session.project_id)
       cursor = parts[parts.length - 1]!.id
       yield* Effect.sleep("10 millis")
     }
@@ -82,20 +75,16 @@ function scanSession(session: { id: string; project_id: string }, resolver: Reso
 function writeBatch(
   parts: Array<{ id: string; session_id: string; message_id: string; data: unknown; time_created: number }>,
   projectID: string,
-  resolver: Resolver,
-  enabled: ReadonlySet<Kind>,
 ) {
   return Effect.gen(function* () {
     type ToWrite = {
       part: (typeof parts)[number]
-      kind: Kind
       body: string
       tool_name: string | null
       time: number
     }
     const writes: ToWrite[] = []
     for (const p of parts) {
-      const role = yield* resolver.role(p.message_id)
       // Reconstruct the MessageV2.Part shape that extract() expects.
       // PartTable.data stores everything except id/sessionID/messageID.
       const fullPart = {
@@ -104,11 +93,11 @@ function writeBatch(
         messageID: p.message_id,
         ...(p.data as object),
       } as MessageV2.Part
-      const extracted = extract(fullPart, role, enabled)
+      const extracted = extract(fullPart)
       if (!extracted) continue
       writes.push({
         part: p,
-        kind: extracted.kind,
+
         body: extracted.body,
         tool_name: extracted.tool_name,
         time: p.time_created,
@@ -123,42 +112,17 @@ function writeBatch(
             session_id: w.part.session_id,
             message_id: w.part.message_id,
             project_id: projectID,
-            kind: w.kind,
+
             tool_name: w.tool_name,
             body: w.body,
             time_created: w.time,
           })
           .onConflictDoUpdate({
             target: HistoryFtsTable.part_id,
-            set: { kind: w.kind, tool_name: w.tool_name, body: w.body, time_created: w.time },
+            set: { tool_name: w.tool_name, body: w.body, time_created: w.time },
           })
           .run()
       }
     })
   })
 }
-
-export interface Interface {
-  readonly init: () => Effect.Effect<void>
-}
-
-export class Service extends Context.Service<Service, Interface>()("@opencode/History.Backfill") {}
-
-export const layer: Layer.Layer<Service, never, Config.Service> = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const cfg = yield* Config.Service
-    return Service.of({
-      init: Effect.fn("History.Backfill.init")(function* () {
-        const config = yield* cfg.get()
-        const kinds = config.history?.kinds ?? DEFAULT_KINDS
-        const enabled = new Set<Kind>(kinds as readonly Kind[])
-        // Fire-and-forget: do not block bootstrap on the potentially long scan.
-        yield* backfillAll(enabled).pipe(
-          Effect.catchCause((cause) => Effect.sync(() => log.warn("backfill aborted", { cause: String(cause) }))),
-          Effect.forkDetach,
-        )
-      }),
-    })
-  }),
-)

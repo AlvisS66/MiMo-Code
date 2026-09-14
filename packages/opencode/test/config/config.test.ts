@@ -2640,3 +2640,47 @@ describe("tool config inline struct", () => {
     ).toThrow()
   })
 })
+
+test("ignores removed history kinds in existing configuration", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await writeConfig(dir, { history: { kinds: [] }, model: "test/model" })
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const config = await load()
+      expect(config.model).toBe("test/model")
+      expect((config as Record<string, unknown>).history).toBeUndefined()
+    },
+  })
+})
+
+for (const extension of ["json", "jsonc"]) {
+  it.live(`updateGlobal accepts removed history kinds in ${extension}`, () =>
+    provideTmpdirInstance(() => Effect.gen(function* () {
+      const original = Global.Path.config
+      const dir = yield* Effect.promise(() => fs.mkdtemp(path.join(original, "history-write-")))
+      const file = path.join(dir, `mimocode.${extension}`)
+      const before = extension === "jsonc"
+        ? '{\n // keep this comment\n "history": {"kinds": []}, "model": "test/original"\n}'
+        : JSON.stringify({ history: { kinds: [] }, model: "test/original" })
+      yield* Effect.promise(() => Filesystem.write(file, before))
+      Global.Path.config = dir
+      try {
+        const svc = yield* Config.Service
+        const next = yield* svc.updateGlobal({ model: "test/updated" })
+        expect(next.model).toBe("test/updated")
+        expect((next as Record<string, unknown>).history).toBeUndefined()
+        const written = yield* Effect.promise(() => Filesystem.readText(file))
+        expect(ConfigParse.jsonc(written, file)).toMatchObject({ model: "test/updated" })
+        if (extension === "jsonc") expect(written).toContain("// keep this comment")
+        expect((yield* svc.get()).model).toBe("test/updated")
+      } finally {
+        Global.Path.config = original
+        yield* Effect.promise(() => fs.rm(dir, { recursive: true, force: true }))
+      }
+    }))
+  )
+}

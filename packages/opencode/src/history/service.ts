@@ -6,20 +6,16 @@ import { detail, page, summary } from "./media"
 import { projection } from "./projection"
 import type { PartID } from "../session/schema"
 import type { MessageID } from "../session/schema"
-import { Config } from "../config"
 import { Bus } from "../bus"
 import { Instance } from "../project/instance"
 import { buildFtsQuery } from "./fts-query"
-import type { Kind } from "./extract"
 import { layer as writerLayer, Service as WriterService } from "./writer"
-import { layer as backfillLayer, Service as BackfillService } from "./backfill"
 
 export type SearchHit = {
   part_id: string
   session_id: string
   message_id: string
   project_id: string
-  kind: Kind
   tool_name: string | null
   snippet: string
   score: number
@@ -52,7 +48,6 @@ export interface Interface {
     query: string
     scope?: "project" | "global"
     session_id?: string
-    kind?: Kind | Kind[]
     tool_name?: string
     time_after?: number
     time_before?: number
@@ -75,18 +70,14 @@ type Row = {
   session_id: string
   message_id: string
   project_id: string
-  kind: string
   tool_name: string | null
   snippet: string
   score: number
   time_created: number
 }
 
-export const defaultLayer: Layer.Layer<Service | WriterService | BackfillService, never, never> = Layer.suspend(() =>
-  Layer.mergeAll(layer, writerLayer, backfillLayer).pipe(
-    Layer.provide(Config.defaultLayer),
-    Layer.provide(Bus.defaultLayer),
-  ),
+export const defaultLayer: Layer.Layer<Service | WriterService, never, never> = Layer.suspend(() =>
+  Layer.mergeAll(layer, writerLayer).pipe(Layer.provide(Bus.defaultLayer)),
 )
 
 export const layer = Layer.effect(
@@ -110,11 +101,6 @@ export const layer = Layer.effect(
         conditions.push("history_fts.session_id = ?")
         params.push(input.session_id)
       }
-      if (input.kind) {
-        const kinds = Array.isArray(input.kind) ? input.kind : [input.kind]
-        conditions.push(`history_fts.kind IN (${kinds.map(() => "?").join(",")})`)
-        for (const k of kinds) params.push(k)
-      }
       if (input.tool_name) {
         conditions.push("history_fts.tool_name = ?")
         params.push(input.tool_name)
@@ -131,7 +117,7 @@ export const layer = Layer.effect(
       const whereClause = conditions.length > 0 ? `AND ${conditions.join(" AND ")}` : ""
       const sqlText = `
         SELECT history_fts.part_id, history_fts.session_id, history_fts.message_id,
-               history_fts.project_id, history_fts.kind, history_fts.tool_name,
+               history_fts.project_id, history_fts.tool_name,
                history_fts.time_created,
                substr(snippet(history_fts_idx, 0, '<<', '>>', '...', 32), 1, 1001) AS snippet,
                bm25(history_fts_idx) AS score
@@ -153,7 +139,6 @@ export const layer = Layer.effect(
         session_id: r.session_id,
         message_id: r.message_id,
         project_id: r.project_id,
-        kind: r.kind as Kind,
         tool_name: r.tool_name,
         snippet: summary(r.snippet),
         score: -r.score,
@@ -218,7 +203,7 @@ export const layer = Layer.effect(
       if (messages.length === 0) return { session_id: anchor.session_id, messages: [] }
       const parts = Database.use((db) =>
         db
-          .select(projection(true, true, true, true, true))
+          .select(projection(true))
           .from(PartTable)
           .where(
             and(

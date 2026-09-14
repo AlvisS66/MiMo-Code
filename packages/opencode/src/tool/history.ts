@@ -13,10 +13,6 @@ const parameters = z
     query: z.string().optional(),
     scope: z.enum(["project", "global"]).optional(),
     session_id: z.string().optional(),
-    kind: z
-      .array(z.enum(["user_text", "assistant_text", "tool_input", "tool_error", "reasoning", "tool_output"]))
-      .min(1)
-      .optional(),
     tool_name: z.string().optional(),
     time_after: z.number().finite().optional(),
     time_before: z.number().finite().optional(),
@@ -114,7 +110,8 @@ function aroundBlocks(
     if (!take(b)) break
   }
   const truncated =
-    picked.length < blocks.length || (anchor !== undefined && (picked[0] !== anchor || picked[0]!.lines.length !== anchor.lines.length))
+    picked.length < blocks.length ||
+    (anchor !== undefined && (picked[0] !== anchor || picked[0]!.lines.length !== anchor.lines.length))
   return { picked, truncated }
 }
 
@@ -192,7 +189,7 @@ export const HistoryTool = Tool.define(
               `Found ${hits.length} matches. Summaries only; use history operation=get part_id=... for full details.`,
               ...hits.map(
                 (h) =>
-                  `### session_id=${h.session_id} message_id=${h.message_id} part_id=${h.part_id} time=${h.time_created}\n${h.kind} ${h.tool_name ?? ""} score=${h.score.toFixed(3)}\n${h.snippet}`,
+                  `### session_id=${h.session_id} message_id=${h.message_id} part_id=${h.part_id} time=${h.time_created}\n${h.tool_name ?? ""} score=${h.score.toFixed(3)}\n${h.snippet}`,
               ),
             ])
             return reply(out.text, hits.length, out.truncated)

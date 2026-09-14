@@ -58,7 +58,7 @@ describe("HistoryTool", () => {
               session_id: "ses_a",
               message_id: "msg_a",
               project_id: "proj_a",
-              kind: "user_text",
+
               tool_name: null,
               body: "JWT signing test",
               time_created: 1000,
@@ -235,3 +235,17 @@ describe("HistoryTool", () => {
     ),
   )
 })
+
+it.live("search schema has no content-type filter", () =>
+  provideTmpdirInstance(() =>
+    Effect.gen(function* () {
+      const info = yield* HistoryTool
+      const tool = yield* info.init()
+      expect(tool.parameters.shape).not.toHaveProperty("kind")
+      expect(tool.parameters.safeParse({ operation: "search", query: "needle" }).success).toBe(true)
+      for (const kind of ["user_text", "assistant_text", "reasoning", "tool_output", "tool_error", "file"]) {
+        expect(tool.parameters.safeParse({ operation: "search", query: "needle", kind: [kind] }).success).toBe(false)
+      }
+    }),
+  ),
+)
