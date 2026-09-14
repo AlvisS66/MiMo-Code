@@ -3,7 +3,7 @@ import { RecoverableError } from "./recoverable"
 import DESCRIPTION from "./actor.txt"
 import DESCRIPTION_CHECKPOINT from "./actor.checkpoint.txt"
 import SHELL_DESCRIPTION from "./actor.shell.txt"
-import { withCheckpointDescription, withCheckpointClause } from "./checkpoint-description"
+import { withCheckpointDescription } from "./checkpoint-description"
 import { tokenize } from "./shell-tokenize"
 import z from "zod"
 import { Session } from "../session"
@@ -20,7 +20,6 @@ import { spawnRef } from "@/actor/spawn-ref"
 import { TaskRegistry } from "@/task/registry"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { TaskID } from "@/task/schema"
-import { SessionCheckpoint } from "@/session/checkpoint"
 import { EffectBridge } from "@/effect"
 import { inboxServiceRef } from "@/inbox/inbox-ref"
 import { Effect, Deferred } from "effect"
@@ -64,8 +63,8 @@ function suggestActorVerb(input: string): string | undefined {
 // uses z.string() for subagent_type since the dynamic enum is only needed at
 // Zod validation time (inside execute), not at parse time.
 type ActorShellArgs =
-  | { operation: { action: "run"; subagent_type: string; description: string; prompt: string; model?: string; task_id?: string; timeout_ms?: number; command?: string; context?: "none" | "state" | "full"; output_schema?: Record<string, unknown> } }
-  | { operation: { action: "spawn"; subagent_type: string; description: string; prompt: string; model?: string; task_id?: string; command?: string; context?: "none" | "state" | "full"; output_schema?: Record<string, unknown> } }
+  | { operation: { action: "run"; subagent_type: string; description: string; prompt: string; model?: string; task_id?: string; timeout_ms?: number; command?: string; output_schema?: Record<string, unknown> } }
+  | { operation: { action: "spawn"; subagent_type: string; description: string; prompt: string; model?: string; task_id?: string; command?: string; output_schema?: Record<string, unknown> } }
   | { operation: { action: "status"; actor_id: string } }
   | { operation: { action: "wait"; actor_id: string; timeout_ms?: number } }
   | { operation: { action: "cancel"; actor_id: string } }
@@ -126,17 +125,33 @@ function rejectActorFlag(verb: string, args: string[], line: number) {
   })
 }
 
+// Model-facing spawn/run cannot request fork/context inheritance — only runtime
+// callers (checkpoint-writer, session peer) create forks. Reject the flag only
+// after the three positionals, so a prompt that literally contains "--context"
+// is not misread as a flag.
+function rejectContextFlag(verb: string, args: string[], line: number) {
+  const flagIdx = args.findIndex((a) => a === "--context" || a.startsWith("--context="))
+  if (flagIdx < 3) return undefined
+  return Effect.fail({
+    kind: "flag" as const,
+    line,
+    detail: `actor: ${verb}: unknown flag --context. Subagents always receive only the prompt; fork/context inheritance is system-only.`,
+  })
+}
+
 const mapActorVerb = Effect.fn("mapActorVerb")(function* (verb: string | undefined, args: string[], line: number) {
   switch (verb) {
     case "run": {
-      const rejected = rejectActorFlag(verb, args, line)
-      if (rejected) return yield* rejected
+      const rejectedActor = rejectActorFlag(verb, args, line)
+      if (rejectedActor) return yield* rejectedActor
+      const rejectedContext = rejectContextFlag(verb, args, line)
+      if (rejectedContext) return yield* rejectedContext
       const { flags, rest } = yield* extractNamedFlags(
         args,
-        ["model", "task", "timeout", "command", "context", "output-schema"],
+        ["model", "task", "timeout", "command", "output-schema"],
         line,
       )
-      if (rest.length !== 3) return yield* actorArityError("run", '<subagent_type> "<description>" "<prompt>" [--model <ref>] [--task <TID>] [--timeout <ms>] [--command <cmd>] [--context none|state|full] [--output-schema <json>]', rest, line)
+      if (rest.length !== 3) return yield* actorArityError("run", '<subagent_type> "<description>" "<prompt>" [--model <ref>] [--task <TID>] [--timeout <ms>] [--command <cmd>] [--output-schema <json>]', rest, line)
       return {
         operation: {
           action: "run" as const,
@@ -147,7 +162,6 @@ const mapActorVerb = Effect.fn("mapActorVerb")(function* (verb: string | undefin
           ...(flags.task ? { task_id: flags.task } : {}),
           ...(flags.timeout ? { timeout_ms: Number(flags.timeout) } : {}),
           ...(flags.command ? { command: flags.command } : {}),
-          ...(flags.context ? { context: flags.context } : {}),
           // JSON.parse throw surfaces as a parse-error for the whole script (parse
           // is all-or-nothing); bad enum/number flag values instead defer to zod at execute.
           ...(flags["output-schema"] ? { output_schema: JSON.parse(flags["output-schema"]) } : {}),
@@ -155,14 +169,16 @@ const mapActorVerb = Effect.fn("mapActorVerb")(function* (verb: string | undefin
       } as ActorShellArgs
     }
     case "spawn": {
-      const rejected = rejectActorFlag(verb, args, line)
-      if (rejected) return yield* rejected
+      const rejectedActor = rejectActorFlag(verb, args, line)
+      if (rejectedActor) return yield* rejectedActor
+      const rejectedContext = rejectContextFlag(verb, args, line)
+      if (rejectedContext) return yield* rejectedContext
       const { flags, rest } = yield* extractNamedFlags(
         args,
-        ["model", "task", "command", "context", "output-schema"],
+        ["model", "task", "command", "output-schema"],
         line,
       )
-      if (rest.length !== 3) return yield* actorArityError("spawn", '<subagent_type> "<description>" "<prompt>" [--model <ref>] [--task <TID>] [--command <cmd>] [--context none|state|full] [--output-schema <json>]', rest, line)
+      if (rest.length !== 3) return yield* actorArityError("spawn", '<subagent_type> "<description>" "<prompt>" [--model <ref>] [--task <TID>] [--command <cmd>] [--output-schema <json>]', rest, line)
       return {
         operation: {
           action: "spawn" as const,
@@ -172,7 +188,6 @@ const mapActorVerb = Effect.fn("mapActorVerb")(function* (verb: string | undefin
           ...(flags.model ? { model: flags.model } : {}),
           ...(flags.task ? { task_id: flags.task } : {}),
           ...(flags.command ? { command: flags.command } : {}),
-          ...(flags.context ? { context: flags.context } : {}),
           ...(flags["output-schema"] ? { output_schema: JSON.parse(flags["output-schema"]) } : {}),
         },
       } as ActorShellArgs
@@ -302,13 +317,15 @@ export function recoverActorArgs(rawArgs: unknown): ActorShellArgs | undefined {
     const op: Record<string, unknown> = { action: inferAction(obj), subagent_type, description, prompt }
     // Carry only the optional fields a confused model plausibly puts at top level
     // alongside the bare Task-prior triple. This is a deliberate subset of the
-    // run/spawn schema's optionals (model, timeout_ms, command, context,
-    // task_id, output_schema) — the others (timeout_ms/command/context/output_schema)
-    // are dropped here, falling back to their schema defaults. Low risk in practice:
-    // the bare shape mimo emits is the 3 required fields, rarely with extras. When
-    // adding an actor schema field, decide whether bare-shape recover should carry
-    // it here, or this whitelist silently drifts from the schema. (The actor_id
-    // carry just below is the one deliberate exception — a field NOT in the schema.)
+    // run/spawn schema's optionals (model, timeout_ms, command,
+    // task_id, output_schema) — the others (timeout_ms/command/output_schema)
+    // are dropped here, falling back to their schema defaults. `context` is
+    // deliberately NOT recovered: models must not request fork inheritance.
+    // Low risk in practice: the bare shape mimo emits is the 3 required fields,
+    // rarely with extras. When adding an actor schema field, decide whether
+    // bare-shape recover should carry it here, or this whitelist silently
+    // drifts from the schema. (The actor_id carry just below is the one
+    // deliberate exception — a field NOT in the schema.)
     if (typeof obj.model === "string") op.model = obj.model
     if (typeof obj.task_id === "string") op.task_id = obj.task_id
     // Carried on purpose even though no action accepts it, so the strict schema
@@ -331,7 +348,6 @@ export const ActorTool = Tool.define(
     const provider = yield* Provider.Service
     const sessions = yield* Session.Service
     const actorRegistry = yield* ActorRegistry.Service
-    const checkpoint = yield* SessionCheckpoint.Service
     const waiter = yield* ActorWaiter.Service
     const tasks = yield* TaskRegistry.Service
 
@@ -388,16 +404,6 @@ export const ActorTool = Tool.define(
         .optional()
         .describe("(optional) Milliseconds to wait before returning { status: 'timeout' }. Default 600000 (10 min).")
 
-      const contextField = z
-        .enum(["none", "state", "full"])
-        .optional()
-        .describe(
-          withCheckpointClause(
-            "(optional) Context inheritance. 'none' (default): child sees only prompt. 'full': child sees parent conversation (prefix cache sharing).",
-            "'state': child gets checkpoint summary.",
-          ),
-        )
-
       const runSchema = z.strictObject({
         action: z
           .literal("run")
@@ -414,7 +420,6 @@ export const ActorTool = Tool.define(
           .describe(MODEL_PARAM_DESCRIPTION),
         timeout_ms: timeoutField,
         command: z.string().min(1).optional().describe("(optional) The command that triggered this task."),
-        context: contextField,
         task_id: z
           .string()
           .min(1)
@@ -445,7 +450,6 @@ export const ActorTool = Tool.define(
           .optional()
           .describe(MODEL_PARAM_DESCRIPTION),
         command: z.string().min(1).optional().describe("(optional) The command that triggered this task."),
-        context: contextField,
         task_id: z
           .string()
           .min(1)
@@ -757,27 +761,8 @@ export const ActorTool = Tool.define(
           )
         }
 
-        let prompt = op.prompt
+        const prompt = op.prompt
         const background = op.action ==="spawn"
-
-        // Inject checkpoint summaries for context="state" mode
-        if (op.context === "state") {
-          const latest = yield* checkpoint
-            .loadLatest(ctx.sessionID)
-            .pipe(Effect.catch(() => Effect.succeed(undefined)))
-          if (latest) {
-            prompt =
-              [
-                "<session-state>",
-                "Here is a summary of the parent session's progress:",
-                "",
-                latest,
-                "</session-state>",
-                "",
-              ].join("\n") + prompt
-          }
-          // If no checkpoint, fall through — child gets just the prompt (same as "none")
-        }
 
         const msg = yield* Effect.sync(() => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }))
         if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
@@ -823,7 +808,7 @@ export const ActorTool = Tool.define(
           agentType: next.name,
           description: op.description,
           task: prompt,
-          context: op.context ?? "none",
+          context: "none",
           tools: next.toolAllowlist ? [...next.toolAllowlist] : "INHERIT",
           model,
           background,

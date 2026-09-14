@@ -28,7 +28,8 @@ describe("tool schema checkpoint copy is composed, not always-on", () => {
 
   test("checkpoint fragments teach the disabled lifecycle", () => {
     expect(ACTOR_CHECKPOINT).toMatch(/checkpoint/i)
-    expect(ACTOR_CHECKPOINT).toContain('context="state"')
+    expect(ACTOR_CHECKPOINT).not.toContain('context="state"')
+    expect(ACTOR_CHECKPOINT).toContain("progress.md")
     expect(MEMORY_CHECKPOINT).toMatch(/checkpoint/i)
   })
 
@@ -48,14 +49,19 @@ describe("tool schema checkpoint copy is composed, not always-on", () => {
     expect(memory).toContain("Session checkpoints")
   })
 
-  test("actor context clause mentions state only when checkpointing is on", () => {
-    const base =
-      "(optional) Context inheritance. 'none' (default): child sees only prompt. 'full': child sees parent conversation (prefix cache sharing)."
-    const extra = "'state': child gets checkpoint summary."
+  test("withCheckpointClause helper still gates optional copy on the flag", () => {
+    const base = "(optional) example clause."
+    const extra = "extra checkpoint sentence."
     set("true")
     expect(withCheckpointClause(base, extra)).toBe(base)
     expect(withCheckpointClause(base, extra)).not.toMatch(/checkpoint/i)
     set("false")
-    expect(withCheckpointClause(base, extra)).toContain("checkpoint summary")
+    expect(withCheckpointClause(base, extra)).toContain("checkpoint sentence")
+  })
+
+  test("actor tool descriptions do not advertise a model-facing context parameter", () => {
+    expect(ACTOR_DESCRIPTION).not.toContain('context="full"')
+    expect(ACTOR_DESCRIPTION).not.toContain('context="state"')
+    expect(ACTOR_SHELL).not.toContain("--context")
   })
 })

@@ -21,13 +21,13 @@ appends them at request time per-agent).
 #   - $vars are preserved as literal text (no expansion)
 
 # DEFAULT — return actor_id immediately, run in the background, stay responsive:
-    actor spawn <subagent_type> "<description>" "<prompt>" [--model <ref>] [--command <cmd>] [--context none|state|full] [--output-schema '<json>']
+    actor spawn <subagent_type> "<description>" "<prompt>" [--model <ref>] [--command <cmd>] [--output-schema '<json>']
     # bind it to one of your `task` tool tasks (TID from the `task` tool, e.g. T4):
     actor spawn <subagent_type> "<description>" "<prompt>" --task <TID>
 
 # EXCEPTION — block the whole conversation until done, return the final message inline.
 # Only for a tiny, fast lookup whose answer gates your very next decision this turn:
-    actor run <subagent_type> "<description>" "<prompt>" [--model <ref>] [--timeout <ms>] [--command <cmd>] [--context none|state|full] [--output-schema '<json>']
+    actor run <subagent_type> "<description>" "<prompt>" [--model <ref>] [--timeout <ms>] [--command <cmd>] [--output-schema '<json>']
     # bind it to one of your `task` tool tasks (TID from the `task` tool, e.g. T4):
     actor run <subagent_type> "<description>" "<prompt>" --task <TID>
 
@@ -81,9 +81,9 @@ Examples:
     actor run explore "Is the field public API" "Is `retryLimit` re-exported from src/index.ts? yes/no + file:line."
 
 # spawn/run flags: --timeout ms before giving up (run only); --command the command that
-#   triggered this; --context none|state|full
-#   (default none); --output-schema a JSON Schema STRING (single-quote it) — forces the
+#   triggered this; --output-schema a JSON Schema STRING (single-quote it) — forces the
 #   subagent to return a matching object instead of free text.
+#   Context/fork inheritance is system-only — the subagent always sees only the prompt.
 
 When to use what:
     spawn  — THE DEFAULT for all delegation: parallel fan-out, or fire-and-forget background

@@ -266,12 +266,22 @@ describe("actor.shell.parse: full parity flags", () => {
     ])
   })
 
-  test("run with --context (enum)", async () => {
-    const out = await parse('actor run explore "d" "p" --context full')
-    expect(out).toEqual([
-      { operation: { action: "run", subagent_type: "explore", description: "d", prompt: "p", context: "full" } },
-    ])
-  })
+  for (const script of [
+    'actor run explore "d" "p" --context full',
+    'actor run explore "d" "p" --context=state',
+    'actor spawn general "d" "p" --context none',
+  ]) {
+    test(`rejects --context (model cannot request fork/context): ${script}`, async () => {
+      const exit = await Effect.runPromise(Effect.exit(parseActorScript(script)))
+      expect(exit._tag).toBe("Failure")
+      const cause: any = (exit as any).cause
+      const fail = cause.reasons?.find?.((r: any) => r._tag === "Fail") ?? cause
+      const err = fail.error ?? fail
+      expect(err.kind).toBe("flag")
+      expect(err.detail).toContain("unknown flag --context")
+      expect(err.detail).toContain("system-only")
+    })
+  }
 
   test("run with --command", async () => {
     const out = await parse('actor run explore "d" "p" --command "/review"')
@@ -294,10 +304,10 @@ describe("actor.shell.parse: full parity flags", () => {
     ])
   })
 
-  test("multiple flags combine on run", async () => {
-    const out = await parse('actor run explore "d" "p" --model lite --context state --timeout 5000')
+  test("multiple flags combine on run (no context)", async () => {
+    const out = await parse('actor run explore "d" "p" --model lite --timeout 5000')
     expect(out).toEqual([
-      { operation: { action: "run", subagent_type: "explore", description: "d", prompt: "p", model: "lite", context: "state", timeout_ms: 5000 } },
+      { operation: { action: "run", subagent_type: "explore", description: "d", prompt: "p", model: "lite", timeout_ms: 5000 } },
     ])
   })
 
