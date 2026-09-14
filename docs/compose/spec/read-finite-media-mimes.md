@@ -3,19 +3,22 @@ feature: read-finite-media-mimes
 status: delivered
 updated: 2026-09-12
 branch: fix/read-finite-media-mimes
-commits: 6fbb1732..d1ab9143
+commits: 6fbb1732..4b4d5b90
 ---
 
 # read finite media MIME allowlist
 
 ## Report
 
-**What was built** — `read` no longer treats every `audio/*` or `video/*` MIME as attachable media. Attachment branches open only for a finite allowlist in `util/media.ts`: images `image/jpeg|png|webp|gif`, PDF `application/pdf`, audio `audio/wav|x-wav|mp3|mpeg`, video `video/mp4`. Binary media-like files outside that list (`.webm`, `.aac`, sniffed BMP) refuse with a convert hint naming the list; text-like media-like MIMEs fall through to the text reader. That last path is the bugfix: `mime-types` maps `.ts`/`.mts` to `video/mp2t`, which used to enter the video branch and block source reads. `describeMedia` advertises the same finite formats.
+**What was built** — `read` no longer treats every `audio/*` or `video/*` MIME as attachable media. Attachment branches open only for a finite allowlist in `util/media.ts`: images `image/jpeg|png|webp|gif`, PDF `application/pdf`, audio `audio/wav|x-wav|mp3|mpeg`, video `video/mp4`. Binary media-like files outside that list (`.webm`, `.aac`, sniffed BMP) refuse with a convert hint naming the list; text-like media-like MIMEs fall through to the text reader (`.ts`/`.mts` fix for the `video/mp2t` mime-types collision).
+
+Tool description is aligned in a second pass: static `read.txt` stays model-independent, mentions PDF only with “PDF only when the current model supports PDF input”, and names the finite list (`jpeg/png/webp/gif`, `wav/mp3`, `mp4`). Dynamic `describeMedia(model)` advertises only the modalities the model has, with those same finite format names.
 
 **Verification** —
 - `bun typecheck` in `packages/opencode` — PASS
-- `bun test test/util/media.test.ts test/tool/read.test.ts` — 60 pass, 0 fail
-- Reviewer (general-1): all 5 acceptance criteria met; no critical findings
+- `bun test test/util/media.test.ts test/tool/read.test.ts` — 61 pass, 0 fail
+- Reviewer pass 1 (allowlist): all 5 acceptance criteria met; no critical findings
+- Reviewer pass 2 (description alignment): APPROVE; no critical findings
 
 **Journey log** —
 - Root cause: `mime-types` extension lookup, not content sniffing — `.ts` → `video/mp2t` is a known IANA collision with TypeScript.
@@ -23,6 +26,7 @@ commits: 6fbb1732..d1ab9143
 - User chose a stricter-than-MiMo allowlist (no BMP/FLAC/M4A/OGG/MOV/AVI/WMV) over a `modality` tool parameter.
 - BMP was previously attached for transform transcode; it is now refused under the finite image list.
 - Prefix helpers (`isMedia`, `looksLikeMediaMime`) remain for messaging only — they must never gate a successful attach.
+- Static desc must keep PDF caveated, not model-gated; dynamic desc owns capability-specific format lists. Change either string set and update the other + tests.
 
 ## [S1] Problem
 
