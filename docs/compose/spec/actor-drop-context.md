@@ -3,7 +3,7 @@ feature: actor-drop-context
 status: delivered
 updated: 2026-09-14
 branch: feat/actor-drop-context
-commits: bceb411c317b8eaa73cad0cfedccb2c03430797a..799bc40949bf785108485d6bc5aa6b3087eea1ab
+commits: bceb411c..655fa209
 ---
 
 # Actor tool: drop model-facing context
