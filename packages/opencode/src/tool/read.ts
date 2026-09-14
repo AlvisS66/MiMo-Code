@@ -434,11 +434,10 @@ export const ReadTool = Tool.define(
             metadata: { preview: warning, truncated: false, loaded: loaded.map((item) => item.filepath) },
           }
         }
-        // The model may take the media kind while its adapter/API only takes
-        // some formats (the OpenAI-compatible chat adapter emits input_audio for
-        // wav/mp3/flac/m4a/ogg; the MiMo video API takes mp4/mov/avi/wmv).
-        // Refuse the rest up front instead of attaching bytes that
-        // tool-attachment.ts would later replace with a placeholder.
+        // The model may take the media kind while the finite read allowlist is still
+        // the outer gate. After that, the adapter declaration can narrow further
+        // (rare); refuse rather than attaching bytes tool-attachment.ts would
+        // later replace with a placeholder.
         const declared = model ? ModelCapability.modelDeclaration(model, kind) : undefined
         if (declared?.support === "supported" && declared.mimeTypes !== "any" && !declared.mimeTypes.includes(mime)) {
           const warning = [
