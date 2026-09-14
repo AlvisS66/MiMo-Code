@@ -53,7 +53,12 @@ Helpers: `isReadImageMime`, `isReadPdfMime`, `isReadAudioMime`, `isReadVideoMime
    - sample is text-like → **fall through** to the text path (`.ts` / `.mts` fix).
 3. Otherwise → existing text / binary-fail path.
 
-No `modality` tool parameter. Sniffing still overrides extension for known image/pdf/wav headers, but a sniffed MIME outside the finite list (e.g. BMP) is not attached. `describeMedia` names only the finite read allowlist formats.
+No `modality` tool parameter. Sniffing still overrides extension for known image/pdf/wav headers, but a sniffed MIME outside the finite list (e.g. BMP) is not attached.
+
+Tool description alignment (second pass):
+
+- **Static** `read.txt` stays model-independent: it may mention image and PDF, but PDF is caveated (“PDF only when the current model supports PDF input”), and the same line names the finite attach list (`jpeg/png/webp/gif`, `wav/mp3`, `mp4`).
+- **Dynamic** `describeMedia(model)` lists only the modalities the model accepts, each with the same finite format names (`image (jpeg, png, webp, gif)`, `audio (wav, mp3)`, `video (mp4)`). It does not invent PDF support; PDF remains the static caveat plus the runtime capability gate.
 
 `view_image`, prompt-attachment routing, and MCP sampling keep their current prefix/capability logic (out of scope).
 

@@ -25,6 +25,7 @@ import {
   oversizedAttachmentNotice,
   oversizedMediaNotice,
   READ_AUDIO_MIMES,
+  READ_IMAGE_MIMES,
   READ_VIDEO_MIMES,
   readMimeAllowlist,
   sniffAttachmentMime,
@@ -34,6 +35,12 @@ const DEFAULT_READ_LIMIT = 2000
 
 // Format names for the finite read allowlists — what describeMedia advertises
 // and what the attachment branch will actually attach.
+const IMAGE_FORMAT_NAMES: Record<string, string> = {
+  "image/jpeg": "jpeg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+}
 const AUDIO_FORMAT_NAMES: Record<string, string> = {
   "audio/wav": "wav",
   "audio/x-wav": "wav",
@@ -44,23 +51,24 @@ const VIDEO_FORMAT_NAMES: Record<string, string> = {
   "video/mp4": "mp4",
 }
 
-function mediaFormatNames(kind: "audio" | "video") {
-  const names = kind === "audio" ? AUDIO_FORMAT_NAMES : VIDEO_FORMAT_NAMES
-  const mimes = kind === "audio" ? READ_AUDIO_MIMES : READ_VIDEO_MIMES
+function mediaFormatNames(kind: "image" | "audio" | "video") {
+  const names = kind === "image" ? IMAGE_FORMAT_NAMES : kind === "audio" ? AUDIO_FORMAT_NAMES : VIDEO_FORMAT_NAMES
+  const mimes = kind === "image" ? READ_IMAGE_MIMES : kind === "audio" ? READ_AUDIO_MIMES : READ_VIDEO_MIMES
   return [...new Set([...mimes].map((mime) => names[mime] ?? mime))]
 }
 
 /**
- * The audio/video paragraph of the tool description, or undefined when the
- * model accepts neither. Appended per model by the tool registry so a
- * text-only model is never told it can attach media. Formats listed are the
- * finite read allowlist, not the full adapter surface.
+ * Model-dependent media paragraph for the tool description. Appended by the
+ * tool registry so a text-only model is never told it can attach media.
+ * Formats listed are the finite read allowlist, not the full adapter surface.
+ * PDF stays in the static read.txt line with a model-support caveat.
  */
 export function describeMedia(model: Provider.Model | undefined) {
   if (!model) return undefined
+  const image = model.capabilities.input.image ? `image (${mediaFormatNames("image").join(", ")})` : undefined
   const audio = model.capabilities.input.audio ? `audio (${mediaFormatNames("audio").join(", ")})` : undefined
   const video = model.capabilities.input.video ? `video (${mediaFormatNames("video").join(", ")})` : undefined
-  const kinds = [audio, video].filter((kind): kind is string => kind !== undefined)
+  const kinds = [image, audio, video].filter((kind): kind is string => kind !== undefined)
   if (kinds.length === 0) return undefined
   return [
     `- You can read and understand ${kinds.join(" and ")} files directly: this tool returns them as file attachments, and you can then describe, transcribe, summarize, or answer questions about their content yourself, without an external transcription or vision service.`,

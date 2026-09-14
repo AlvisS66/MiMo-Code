@@ -724,16 +724,21 @@ describe("tool.read audio and video capability gate", () => {
 })
 
 describe("tool.read media description", () => {
-  const withMedia = (input: { audio?: boolean; video?: boolean; npm?: string }) =>
+  const withMedia = (input: { image?: boolean; audio?: boolean; video?: boolean; npm?: string }) =>
     ProviderTest.model({
       api: { id: "media", url: "https://example.com", npm: input.npm ?? "@ai-sdk/openai" },
       capabilities: {
         ...visionModel.capabilities,
-        input: { ...visionModel.capabilities.input, audio: input.audio ?? false, video: input.video ?? false },
+        input: {
+          ...visionModel.capabilities.input,
+          image: input.image ?? false,
+          audio: input.audio ?? false,
+          video: input.video ?? false,
+        },
       },
     })
 
-  it.live("omits the media paragraph for a model without audio or video input", () =>
+  it.live("omits the media paragraph for a model without image/audio/video input", () =>
     Effect.sync(() => {
       expect(describeMedia(undefined)).toBeUndefined()
       expect(describeMedia(withMedia({}))).toBeUndefined()
@@ -742,24 +747,44 @@ describe("tool.read media description", () => {
 
   it.live("names only the modalities the model accepts", () =>
     Effect.sync(() => {
+      const image = describeMedia(withMedia({ image: true }))
+      expect(image).toContain("image (jpeg, png, webp, gif)")
+      expect(image).not.toContain("audio")
+      expect(image).not.toContain("video")
+
       const audio = describeMedia(withMedia({ audio: true }))
       expect(audio).toContain("audio (wav, mp3)")
       expect(audio).not.toContain("video")
+      expect(audio).not.toContain("image (")
 
       const video = describeMedia(withMedia({ video: true }))
       expect(video).toContain("video (mp4)")
       expect(video).not.toContain("audio")
+      expect(video).not.toContain("image (")
 
-      expect(describeMedia(withMedia({ audio: true, video: true }))).toContain("audio (wav, mp3) and video (mp4)")
+      expect(describeMedia(withMedia({ image: true, audio: true, video: true }))).toContain(
+        "image (jpeg, png, webp, gif) and audio (wav, mp3) and video (mp4)",
+      )
     }),
   )
 
   it.live("names the finite read allowlist even when the adapter accepts more", () =>
     Effect.gen(function* () {
-      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/openai-compatible" }))).toContain("video (mp4)")
-      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/google" }))).toContain("video (mp4)")
-      expect(describeMedia(withMedia({ audio: true, npm: "@ai-sdk/openai-compatible" }))).toContain("audio (wav, mp3)")
+      expect(describeMedia(withMedia({ image: true, audio: true, video: true, npm: "@ai-sdk/openai-compatible" }))).toContain(
+        "image (jpeg, png, webp, gif) and audio (wav, mp3) and video (mp4)",
+      )
       expect(describeMedia(withMedia({ audio: true, npm: "@ai-sdk/google" }))).toContain("audio (wav, mp3)")
+      expect(describeMedia(withMedia({ video: true, npm: "@ai-sdk/google" }))).toContain("video (mp4)")
+    }),
+  )
+
+  it.live("static read.txt keeps PDF with a model-support caveat and names the finite list", () =>
+    Effect.sync(async () => {
+      const description = await Bun.file(path.join(import.meta.dir, "../../src/tool/read.txt")).text()
+      expect(description).toContain("PDF only when the current model supports PDF input")
+      expect(description).toContain("jpeg/png/webp/gif")
+      expect(description).toContain("wav/mp3")
+      expect(description).toContain("mp4")
     }),
   )
 })
