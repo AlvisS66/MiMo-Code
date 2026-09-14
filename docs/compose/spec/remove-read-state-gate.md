@@ -3,7 +3,7 @@ feature: remove-read-state-gate
 status: delivered
 updated: 2026-09-14
 branch: feat/remove-read-state-gate
-commits: e485a2a5e096a077e381e6df56c332d8150629ae..99a5f9eb19c6c14323271f3b4b5f4933747fa731
+commits: e485a2a5e096a077e381e6df56c332d8150629ae..HEAD
 ---
 
 # Remove Read-before-Edit Hard Gate
@@ -14,10 +14,12 @@ commits: e485a2a5e096a077e381e6df56c332d8150629ae..99a5f9eb19c6c14323271f3b4b5f4
 
 **Verification** — From `packages/opencode` in the worktree:
 - `bun typecheck` — PASS (`tsgo --noEmit` clean)
-- `bun test test/tool/edit.test.ts` — PASS (26/26), including new case "replaces text without a prior read tool call in the conversation"
-- `bun test test/tool/memory-edit-ask-skip.test.ts` — PASS (2/2)
+- `bun test test/tool/edit.test.ts` — PASS, including no-prior-read, write-then-edit, and edit-create-then-edit cases
+- `bun test test/tool/notebook-edit.test.ts` — PASS, notebook_edit replace without prior read
+- `bun test test/tool/write.test.ts` / `memory-edit-ask-skip.test.ts` — PASS
 - Production grep for `assertFileRead` / `tool/read-state` under `packages/opencode/src` — clean
-- Fresh reviewer subagent: PASS, no CRITICAL findings (residual: no notebook-edit behavioral unit test for the no-prior-read path)
+- Fresh reviewer subagent (impl): PASS, no CRITICAL
+- Second reviewer (self-write / notebook coverage): PASS; four post-gate behaviors locked by real tool tests; gate-return would re-fail them
 
 **Journey log** —
 1. The gate was introduced in `cb633947` (PR #1243) to turn edit.txt usage notes into RecoverableError enforcement for existing-file edits.
