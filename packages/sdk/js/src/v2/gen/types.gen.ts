@@ -1059,6 +1059,13 @@ export type AssistantMessage = {
     }
   }
   structured?: unknown
+  actorResult?: {
+    finalText?: string
+    structured?: unknown
+    reportedStatus?: "success" | "partial" | "failed" | "blocked"
+    reportedSummary?: string
+    warnings?: Array<string>
+  }
   variant?: string
   finish?: string
 }
@@ -5576,6 +5583,8 @@ export type SessionResumeData = {
     agentID?: string
     task_id?: string
     titleLocale?: string
+    modelProviderID?: string
+    modelID?: string
   }
   url: "/session/{sessionID}/turn/{assistantMessageID}/resume"
 }

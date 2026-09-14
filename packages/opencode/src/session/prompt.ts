@@ -3,14 +3,27 @@ import os from "os"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
+import {
+  base64ByteSize,
+  classifyAttachment,
+  fitsMediaBase64,
+  isAudioAttachment,
+  isVideoAttachment,
+  MAX_MEDIA_BASE64_BYTES,
+  oversizedAttachmentNotice,
+  oversizedMediaNotice,
+} from "@/util/media"
+import { shrinkAttachment } from "@/provider/image"
 import { classifyAssistantStep } from "./classify"
 import { Log, Token } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent } from "../agent/agent"
-import { decideAskRouting, hasActorTool, resolveInvalidOutputPolicy, SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
-import { renderActorNotification } from "@/inbox/render"
+import { decideAskRouting, hasActorTool, resolveInvalidOutputPolicy } from "@/agent/config"
+import { makeTerminalNotifier } from "@/actor/notification"
+import { ActorExecution } from "@/actor/execution"
 import { parseReturnHeader } from "@/actor/return-header"
+import { runTurn } from "@/actor/turn"
 import { Provider } from "../provider"
 import { ModelID, ProviderID } from "../provider/schema"
 import {
@@ -458,6 +471,8 @@ export interface ResumeTurnInput {
   agentID?: string
   task_id?: string
   titleLocale?: string
+  /** 可选模型覆盖：用户在继续前切换了模型时，用新模型执行恢复步。 */
+  model?: { providerID: string; modelID: string }
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
@@ -495,6 +510,8 @@ export const layer = Layer.effect(
     const llm = yield* LLM.Service
     const actorRegistry = yield* ActorRegistry.Service
     const inbox = yield* Inbox.Service
+    const executions = yield* ActorExecution.Service
+    const notifyTerminal = makeTerminalNotifier({ inbox, registry: actorRegistry, sessions })
 
     // Track sessions that have already shown the "loaded instructions" toast so we
     // surface it once per primary session rather than on every run-loop turn.
@@ -2605,7 +2622,57 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   { ...part, messageID: info.id, sessionID: input.sessionID },
                 ]
               }
-              break
+              // Inline payloads (clipboard pastes) are classified on the base64
+              // length: an oversized image within the source ceiling is
+              // recompressed, anything else oversized is dropped. Audio and
+              // video are bounded only by the provider's ENCODED-size cap (see
+              // MAX_MEDIA_BASE64_BYTES) and never enter classifyAttachment.
+              const inline = part.url.slice(part.url.indexOf(",") + 1)
+              const inlineSize = base64ByteSize(inline)
+              if (isAudioAttachment(part.mime) || isVideoAttachment(part.mime)) {
+                if (inline.length <= MAX_MEDIA_BASE64_BYTES) break
+                return [
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedMediaNotice({
+                      label: `"${part.filename ?? part.mime}"`,
+                      size: inlineSize,
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
+              const verdict = classifyAttachment(part.mime, inlineSize)
+              if (verdict === "fits") break
+              const fitted = verdict === "shrink" ? shrinkAttachment(part.mime, Buffer.from(inline, "base64")) : undefined
+              if (!fitted) {
+                return [
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedAttachmentNotice({
+                      label: `"${part.filename ?? part.mime}"`,
+                      size: inlineSize,
+                      compressed: verdict === "shrink",
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
+              return [
+                {
+                  ...part,
+                  messageID: info.id,
+                  sessionID: input.sessionID,
+                  mime: fitted.mime,
+                  url: `data:${fitted.mime};base64,${fitted.base64}`,
+                },
+              ]
             case "file:": {
               log.info("file", { mime: part.mime })
               const filepath = fileURLToPath(part.url)
@@ -2751,23 +2818,77 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 ]
               }
 
+              const call: Draft<MessageV2.Part> = {
+                messageID: info.id,
+                sessionID: input.sessionID,
+                type: "text",
+                synthetic: true,
+                text: `Called the Read tool with the following input: {"file_path":"${filepath}"}`,
+              }
+              // Size gate on stat, before the file is read (see classifyAttachment):
+              // an under-limit file is inlined as-is, an oversized image within
+              // the source ceiling is read and recompressed, and anything else
+              // oversized becomes a notice without being read, so it never
+              // reaches the session DB. Audio and video are bounded only by the
+              // provider's ENCODED-size cap (fitsMediaBase64) and never enter
+              // classifyAttachment.
+              const size = yield* fsys.stat(filepath).pipe(
+                Effect.map((info) => Number(info.size)),
+                Effect.catch(() => Effect.succeed(0)),
+              )
+              const media = isAudioAttachment(part.mime) || isVideoAttachment(part.mime)
+              if (media && !fitsMediaBase64(size)) {
+                return [
+                  call,
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedMediaNotice({
+                      label: `"${filepath}" (${part.mime})`,
+                      size,
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
+              const verdict = media ? "fits" : classifyAttachment(part.mime, size)
+              const fitted =
+                verdict === "reject"
+                  ? undefined
+                  : verdict === "shrink"
+                    ? shrinkAttachment(part.mime, Buffer.from(yield* fsys.readFile(filepath).pipe(Effect.catch(Effect.die))))
+                    : {
+                        mime: part.mime,
+                        base64: Buffer.from(yield* fsys.readFile(filepath).pipe(Effect.catch(Effect.die))).toString("base64"),
+                      }
+              if (!fitted) {
+                return [
+                  call,
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: oversizedAttachmentNotice({
+                      label: `"${filepath}" (${part.mime})`,
+                      size,
+                      compressed: verdict === "shrink",
+                      hint: "It was not attached.",
+                    }),
+                  },
+                ]
+              }
               return [
-                {
-                  messageID: info.id,
-                  sessionID: input.sessionID,
-                  type: "text",
-                  synthetic: true,
-                  text: `Called the Read tool with the following input: {"file_path":"${filepath}"}`,
-                },
+                call,
                 {
                   id: part.id,
                   messageID: info.id,
                   sessionID: input.sessionID,
                   type: "file",
-                  url:
-                    `data:${part.mime};base64,` +
-                    Buffer.from(yield* fsys.readFile(filepath).pipe(Effect.catch(Effect.die))).toString("base64"),
-                  mime: part.mime,
+                  url: `data:${fitted.mime};base64,${fitted.base64}`,
+                  mime: fitted.mime,
                   filename: part.filename!,
                   source: part.source,
                 },
@@ -3040,6 +3161,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           agentID: input.agentID ?? "main",
           task_id: input.task_id,
           titleLocale: input.titleLocale,
+          deferInbox: input.source === "hook" && input.agentID !== undefined && input.agentID !== "main",
         })
       },
     )
@@ -3069,7 +3191,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
       const candidates: RecoveryCandidate[] = []
       for (const [index, msg] of msgs.entries()) {
-        if (msg.info.role !== "assistant" || "completed" in msg.info.time) continue
+        if (msg.info.role !== "assistant") continue
+        // 未完成 assistant 才是恢复候选。步级 time.completed 不等于整轮完成——
+        // tool-calls(工具步完但整轮未答)、length(输出截断)、无 finish(中断)均可恢复;
+        // stop / other 等已正常或已终态收尾的不进候选(allowlist,不靠排除法)。
+        // 有 error = 没完成 = 可恢复(processor 注释不变量):任何 error 消息都是候选,
+        // 包括 abandon 后 completed+AbortedError+finish=stop 的场景(恢复失败后仍可重试)。
+        if ("completed" in msg.info.time && !msg.info.error && msg.info.finish && msg.info.finish !== "tool-calls" && msg.info.finish !== "length") continue
+        if (msg.info.finish === "stop" && !msg.info.error) continue
         const assistant = msg.info
         if (!msgs.some((parent) => parent.info.role === "user" && parent.info.id === assistant.parentID)) continue
         if (msgs.slice(index + 1).some((later) => later.info.role === "user" || later.info.role === "assistant")) continue
@@ -3089,10 +3218,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }) {
       const messages = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
       const message = messages.find((item) => item.info.id === input.assistantMessageID)
-      if (!message || message.info.role !== "assistant" || "completed" in message.info.time) return
+      if (!message || message.info.role !== "assistant") return
+      // 已标记 completed 且已有 error → 幂等跳过
+      if ("completed" in message.info.time && message.info.error) return
       yield* sessions.updateMessage({
         ...message.info,
-        time: { ...message.info.time, completed: Date.now() },
+        time: { ...message.info.time, completed: message.info.time.completed ?? Date.now() },
         error: new MessageV2.AbortedError({ message: "Abandoned: resumed as a new assistant turn" }).toObject(),
       })
     })
@@ -3101,10 +3232,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       sessionID: SessionID,
       agentID?: string,
       task_id?: string,
-      notifyParentOnComplete?: boolean,
       titleLocale?: string,
+      deferInbox?: boolean,
+      resumeFrom?: string,
+      modelOverride?: { providerID: string; modelID: string },
     ) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(
-      function* (sessionID: SessionID, agentID?: string, task_id?: string, notifyParentOnComplete?: boolean, titleLocale?: string) {
+      function* (
+        sessionID: SessionID,
+        agentID?: string,
+        task_id?: string,
+        titleLocale?: string,
+        deferInbox = false,
+        resumeFrom?: string,
+        modelOverride?: { providerID: string; modelID: string },
+      ) {
         const ctx = yield* InstanceState.context
         const slog = elog.with({ sessionID })
         let structured: unknown | undefined
@@ -3691,7 +3832,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // must not touch session-level status (Runner.onBusy is Effect.void
           // for non-main actors per F47).
           if (!agentID || agentID === "main") yield* status.set(sessionID, { type: "busy" })
-          yield* inbox.drain(sessionID, agentID ?? "main").pipe(Effect.ignore)
+          if (!deferInbox) yield* inbox.drain(sessionID, agentID ?? "main").pipe(Effect.ignore)
           yield* slog.info("loop", { step })
 
           // F37: filter by agentID so subagent slices stay isolated from the
@@ -3792,7 +3933,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          if (lastAssistant) {
+          if (lastAssistant && lastAssistant.id !== resumeFrom) {
             const classification = classifyAssistantStep({
               phase: "existing-assistant",
               lastUser,
@@ -3884,7 +4025,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
           }
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID, lastUser)
+          const modelProviderID = modelOverride ? ProviderID.make(modelOverride.providerID) : lastUser.model.providerID
+          const modelModelID = modelOverride ? ModelID.make(modelOverride.modelID) : lastUser.model.modelID
+          const model = yield* getModel(modelProviderID, modelModelID, sessionID, lastUser)
           lastModelForPrune = model
           lastFinishedForPrune = usageRecovered ? undefined : lastFinished
           const task = tasks.pop()
@@ -4940,49 +5083,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           finalIsError ? "error" : "completed",
           Option.isSome(lastUserForMetrics) ? lastUserForMetrics.value.info.agent : final.info.agent,
         )
-        // Woken-peer completion signal. forkWork.notify only wraps the FIRST
-        // (spawn) turn; a persistent background peer that finishes a later,
-        // inbox-driven turn would otherwise go idle silently and force the
-        // orchestrator to poll. When this loop was woken via the inbox path
-        // (notifyParentOnComplete), mirror forkWork's actor_notification to the
-        // parent so the event-driven model holds. Gated to background peers and
-        // excludes system subagents (checkpoint-writer/dream/distill). The flag
-        // is never set on the spawn turn, so turn 1 is not double-notified.
-        if (notifyParentOnComplete && agentID && session.parentID) {
-          const actor = yield* actorRegistry.get(sessionID, agentID)
-          if (
-            actor &&
-            actor.mode === "peer" &&
-            actor.background &&
-            !SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent)
-          ) {
-            const finalText =
-              final.info.role === "assistant" ? assistantFinalText(final.info, final.parts) : undefined
-            const parsed = parseReturnHeader(finalText)
-            const status = finalIsError ? "failed" : "completed"
-            yield* inbox
-              .send({
-                receiverSessionID: session.parentID,
-                receiverActorID: actor.parentActorID ?? "main",
-                senderSessionID: sessionID,
-                senderActorID: agentID,
-                type: "actor_notification",
-                content: renderActorNotification({
-                  actorID: agentID,
-                  description: actor.description,
-                  status,
-                  ...(status === "completed"
-                    ? {
-                        result: finalText ?? "(no output)",
-                        ...(parsed.status ? { reportedStatus: parsed.status } : {}),
-                        ...(parsed.summary ? { reportedSummary: parsed.summary } : {}),
-                      }
-                    : { error: final.info.role === "assistant" ? sessionErrorText(final.info.error) : "unknown" }),
-                }),
-              })
-              .pipe(Effect.ignore)
-          }
-        }
         return final
         }).pipe(Effect.onExit(firePostSession), Effect.orDie)
       },
@@ -4992,11 +5092,101 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       "SessionPrompt.loop",
     )(function* (input: z.infer<typeof LoopInput>) {
       const agentID = input.agentID ?? "main"
-      return yield* state.ensureRunning(
-        input.sessionID,
-        agentID,
-        lastAssistant(input.sessionID, agentID),
-        runLoop(input.sessionID, agentID, input.task_id, input.notifyParentOnComplete, input.titleLocale),
+      const work = runLoop(input.sessionID, agentID, input.task_id, input.titleLocale, input.deferInbox)
+      if (!input.notifyParentOnComplete || agentID === "main") {
+        return yield* state.ensureRunning(input.sessionID, agentID, lastAssistant(input.sessionID, agentID), work)
+      }
+      return yield* Effect.acquireUseRelease(
+        executions.acquire(input.sessionID, agentID),
+        (execution) => Effect.gen(function* () {
+          yield* executions.attach(execution)
+          // Cancelled before drain: skip consuming messages for a turn that won't
+          // run. Still falls through to runTurn so onExit sends the cancelled
+          // notification (continued interrupts immediately).
+          // isCancelled is re-checked inside drain just before commit, so a
+          // cancel that lands mid-drain leaves Inbox rows durable instead of
+          // writing a synthetic user message for a turn that will not run.
+          // Re-check cancelled after an empty drain: Actor.cancel's execution
+          // path does not notify — only runTurn.onExit does.
+          if (execution.cancelled) {
+            // no-op; continued below handles interrupt + notification
+          } else if (
+            input.inboxWake &&
+            (yield* inbox.drain(input.sessionID, agentID, () => execution.cancelled)) === 0
+          ) {
+            if (!execution.cancelled) return yield* lastAssistant(input.sessionID, agentID)
+          }
+          // Capture the last assistant delivery even when the turn dies with a
+          // settled error, so settle can persist a partial result the way spawn
+          // does via lastResult. Without this, a failed continuation leaves
+          // result_message_id null after the running transition cleared it.
+          let lastFinal: MessageV2.WithParts | undefined
+          const continued = Effect.gen(function* () {
+            if (execution.cancelled) return yield* Effect.interrupt
+            const final = yield* state.ensureRunning(input.sessionID, agentID, lastAssistant(input.sessionID, agentID), work)
+            lastFinal = final
+            if (final.info.role === "assistant" && final.info.error) {
+              return yield* Effect.die(new Error(sessionErrorText(final.info.error)))
+            }
+            return final
+          }).pipe(Effect.onExit((exit) => Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)
+            ? state.cancelActor(input.sessionID, agentID)
+            : Effect.void))
+          return yield* runTurn(
+            input.sessionID,
+            agentID,
+            continued,
+            // Persist actorResult on the final assistant message so a subsequent
+            // failure wait can find this cycle's delivery via result_message_id.
+            // Without this, registry.updateStatus clears the column on the
+            // running transition and never writes a new one. Mirrors spawn.ts:
+            // success uses the exit value; failure falls back to lastFinal.
+            (exit) =>
+              Effect.gen(function* () {
+                if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return undefined
+                const final = Exit.isSuccess(exit) ? exit.value : lastFinal
+                if (!final || final.info.role !== "assistant") return undefined
+                const text = assistantFinalText(final.info, final.parts)
+                const structured = final.info.structured
+                if (text === undefined && structured === undefined) return undefined
+                const parsed = parseReturnHeader(text)
+                yield* sessions.updateMessage({
+                  ...final.info,
+                  actorResult: {
+                    finalText: text,
+                    structured,
+                    ...(parsed.status ? { reportedStatus: parsed.status } : {}),
+                    ...(parsed.summary ? { reportedSummary: parsed.summary } : {}),
+                  },
+                })
+                return final.info.id
+              }),
+          ).pipe(
+            Effect.provideService(ActorRegistry.Service, actorRegistry),
+            Effect.onExit((exit) => Effect.gen(function* () {
+              const final = Exit.isSuccess(exit) ? exit.value : lastFinal
+              const text = final?.info.role === "assistant" ? assistantFinalText(final.info, final.parts) : undefined
+              const parsed = parseReturnHeader(text)
+              const status = Exit.isSuccess(exit) ? "completed" : Cause.hasInterruptsOnly(exit.cause) ? "cancelled" : "failed"
+              yield* notifyTerminal({
+                sessionID: input.sessionID,
+                actorID: agentID,
+                source: "continuation",
+                status,
+                ...(status === "completed" ? { result: text ?? "(no output)", reportedStatus: parsed.status, reportedSummary: parsed.summary } : {}),
+                ...(Exit.isFailure(exit) && status === "failed" ? {
+                  error: Cause.pretty(exit.cause),
+                  // Carry partial delivery so the parent sees what the turn
+                  // produced before the settled error, matching spawn's notify.
+                  ...(text !== undefined ? { result: text } : {}),
+                  ...(parsed.status ? { reportedStatus: parsed.status } : {}),
+                  ...(parsed.summary ? { reportedSummary: parsed.summary } : {}),
+                } : {}),
+              })
+            })),
+          )
+        }).pipe(Effect.uninterruptible),
+        (execution) => executions.release(execution),
       )
     })
 
@@ -5340,6 +5530,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         )
       }
       const agentID = input.agentID ?? "main"
+      // 校验 model override 在 abandon 之前:getModel 失败时不能先把原消息改成 abandoned。
+      if (input.model) {
+        yield* getModel(ProviderID.make(input.model.providerID), ModelID.make(input.model.modelID), input.sessionID)
+      }
       // Abandon the recovered assistant BEFORE detaching runLoop so callers that
       // observe Error / completed state see it immediately (not only in ensuring
       // after the detached loop finishes). ensuring below remains as an idempotent
@@ -5349,7 +5543,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         input.sessionID,
         agentID,
         lastAssistant(input.sessionID, agentID),
-        runLoop(input.sessionID, agentID, input.task_id, undefined, input.titleLocale).pipe(
+        runLoop(input.sessionID, agentID, input.task_id, input.titleLocale, false, input.assistantMessageID, input.model).pipe(
           Effect.ensuring(
             abandonRecoveredAssistant({ sessionID: input.sessionID, assistantMessageID: input.assistantMessageID, agentID }).pipe(
               Effect.catchCause((cause) =>
@@ -5376,13 +5570,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         )
       }
       const agentID = input.agentID ?? "main"
+      // 校验 model override 在 abandon 之前:getModel 失败时不能先把原消息改成 abandoned。
+      if (input.model) {
+        yield* getModel(ProviderID.make(input.model.providerID), ModelID.make(input.model.modelID), input.sessionID)
+      }
       // Abandon before detaching runLoop — same timing requirement as resume.
       yield* abandonRecoveredAssistant({ sessionID: input.sessionID, assistantMessageID: input.assistantMessageID, agentID })
       yield* state.start(
         input.sessionID,
         agentID,
         lastAssistant(input.sessionID, agentID),
-        runLoop(input.sessionID, agentID, input.task_id, undefined, input.titleLocale).pipe(
+        runLoop(input.sessionID, agentID, input.task_id, input.titleLocale, false, input.assistantMessageID, input.model).pipe(
           Effect.ensuring(
             abandonRecoveredAssistant({ sessionID: input.sessionID, assistantMessageID: input.assistantMessageID, agentID }).pipe(
               Effect.catchCause((cause) =>
@@ -5429,7 +5627,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     )
     return impl
   }),
-)
+).pipe(Layer.provide(ActorExecution.layer))
 
 /** App composition variant with MCP supplied by the process-wide layer. */
 export const appLayer = Layer.suspend(() =>
@@ -5586,6 +5784,8 @@ export const LoopInput = z.object({
   // the FIRST/spawn turn). Left false on spawn/user-driven loops to avoid
   // double-notifying the spawn turn that forkWork already covers.
   notifyParentOnComplete: z.boolean().optional(),
+  inboxWake: z.boolean().optional(),
+  deferInbox: z.boolean().optional(),
 })
 
 export const ShellInput = z.object({
