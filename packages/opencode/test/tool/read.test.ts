@@ -778,13 +778,15 @@ describe("tool.read media description", () => {
     }),
   )
 
-  it.live("static read.txt keeps PDF with a model-support caveat and names the finite list", () =>
+  it.live("static read.txt caveats image/PDF on model modalities and names the finite list", () =>
     Effect.sync(async () => {
       const description = await Bun.file(path.join(import.meta.dir, "../../src/tool/read.txt")).text()
-      expect(description).toContain("PDF only when the current model supports PDF input")
+      expect(description).toContain("when the model includes those modalities")
+      expect(description).toContain("Image and PDF")
       expect(description).toContain("jpeg/png/webp/gif")
       expect(description).toContain("wav/mp3")
       expect(description).toContain("mp4")
+      expect(description).not.toContain("PDF only when")
     }),
   )
 })

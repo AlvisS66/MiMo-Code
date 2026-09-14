@@ -12,7 +12,7 @@ commits: 6fbb1732..4b4d5b90
 
 **What was built** — `read` no longer treats every `audio/*` or `video/*` MIME as attachable media. Attachment branches open only for a finite allowlist in `util/media.ts`: images `image/jpeg|png|webp|gif`, PDF `application/pdf`, audio `audio/wav|x-wav|mp3|mpeg`, video `video/mp4`. Binary media-like files outside that list (`.webm`, `.aac`, sniffed BMP) refuse with a convert hint naming the list; text-like media-like MIMEs fall through to the text reader (`.ts`/`.mts` fix for the `video/mp2t` mime-types collision).
 
-Tool description is aligned in a second pass: static `read.txt` stays model-independent, mentions PDF only with “PDF only when the current model supports PDF input”, and names the finite list (`jpeg/png/webp/gif`, `wav/mp3`, `mp4`). Dynamic `describeMedia(model)` advertises only the modalities the model has, with those same finite format names.
+Tool description is aligned in a second pass: static `read.txt` stays model-independent — image and PDF are attachments when the model includes those modalities — and names the finite list (`jpeg/png/webp/gif`, `wav/mp3`, `mp4`). Dynamic `describeMedia(model)` advertises only the modalities the model has, with those same finite format names.
 
 **Verification** —
 - `bun typecheck` in `packages/opencode` — PASS
@@ -61,7 +61,7 @@ No `modality` tool parameter. Sniffing still overrides extension for known image
 
 Tool description alignment (second pass):
 
-- **Static** `read.txt` stays model-independent: it may mention image and PDF, but PDF is caveated (“PDF only when the current model supports PDF input”), and the same line names the finite attach list (`jpeg/png/webp/gif`, `wav/mp3`, `mp4`).
+- **Static** `read.txt` stays model-independent: one short sentence covers image and PDF — both are attachments “when the model includes those modalities” — and the same line names the finite attach list (`jpeg/png/webp/gif`, `wav/mp3`, `mp4`). All multimodal attach is model-capability gated, not PDF-only.
 - **Dynamic** `describeMedia(model)` lists only the modalities the model accepts, each with the same finite format names (`image (jpeg, png, webp, gif)`, `audio (wav, mp3)`, `video (mp4)`). It does not invent PDF support; PDF remains the static caveat plus the runtime capability gate.
 
 `view_image`, prompt-attachment routing, and MCP sampling keep their current prefix/capability logic (out of scope).
