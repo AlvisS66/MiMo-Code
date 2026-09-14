@@ -84,12 +84,6 @@ You are the subagent's only briefing — it hasn't seen this conversation.
 - If you need short output, say so ("report in under 200 words").
 - For investigation: hand over the question; prescribed steps become dead weight.
 
-## Context
-
-Subagents always receive only the `prompt` you write. Model-facing
-conversation/fork inheritance is not available — that path is system-only.
-Brief the subagent fully in the prompt.
-
 ## Actor ID vs Task ID
 
 `actor_id` identifies a live subagent. It is returned by `spawn`/`run` and accepted by
@@ -126,7 +120,6 @@ postStop check then becomes a no-op.
 - **`wait` on persistent peers caveat**: `wait` is designed for ephemeral subagents you spawned via `spawn`/`run`. Persistent peers idle between turns and never produce a "done" outcome on success — `wait` on a peer will block until that peer fails or is cancelled. Use `send` + `status` to coordinate with peers instead.
 - **`send` semantics**: fire-and-forget; returns within ~5 ms regardless of receiver load. It also WAKES the receiver — an idle subagent runs another turn on its own history, so `send` is how you give one follow-up work. The woken turn's result reaches you as a completion notification, not from the `send` call. On unknown `to_actor_id`, `send` returns `{inboxID: null, error: "receiver not found"}` rather than throwing — handle the error path.
 - Trust the subagent's outputs generally, but the subagent only sees the prompt you wrote; brief it accordingly.
-
 
 ## Examples
 

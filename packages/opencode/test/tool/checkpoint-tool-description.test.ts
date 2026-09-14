@@ -62,6 +62,10 @@ describe("tool schema checkpoint copy is composed, not always-on", () => {
   test("actor tool descriptions do not advertise a model-facing context parameter", () => {
     expect(ACTOR_DESCRIPTION).not.toContain('context="full"')
     expect(ACTOR_DESCRIPTION).not.toContain('context="state"')
+    expect(ACTOR_DESCRIPTION).not.toMatch(/context inheritance/i)
+    expect(ACTOR_DESCRIPTION).not.toContain("## Context")
     expect(ACTOR_SHELL).not.toContain("--context")
+    expect(ACTOR_SHELL).not.toMatch(/context inheritance/i)
+    expect(ACTOR_SHELL).not.toMatch(/system-only/i)
   })
 })

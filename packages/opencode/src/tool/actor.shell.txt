@@ -83,7 +83,6 @@ Examples:
 # spawn/run flags: --timeout ms before giving up (run only); --command the command that
 #   triggered this; --output-schema a JSON Schema STRING (single-quote it) — forces the
 #   subagent to return a matching object instead of free text.
-#   Context/fork inheritance is system-only — the subagent always sees only the prompt.
 
 When to use what:
     spawn  — THE DEFAULT for all delegation: parallel fan-out, or fire-and-forget background
