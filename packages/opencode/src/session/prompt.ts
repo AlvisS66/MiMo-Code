@@ -1156,7 +1156,11 @@ export const layer = Layer.effect(
         return
       }
       const firstUser = input.history.find(hasTitleInput)
-      if (!firstUser && input.arguments === undefined) return
+      // No eligible message and no usable arguments (undefined or blank): a
+      // bare command must not commit a placeholder — that would burn the one
+      // revision-0 shot and lock the title. Let the prompt-phase path retry
+      // once the message is persisted.
+      if (!firstUser && !input.arguments?.trim()) return
       const normalized = normalizeTitleInput(firstUser?.parts ?? [{ type: "text", text: input.arguments }, ...(input.files ?? [])])
       const changed = yield* sessions.setTitleIfDefault({ sessionID: input.session.id, title: normalized.fallback, expectedRevision: input.session.titleRevision, source: "fallback" })
       if (!changed) return

@@ -27,12 +27,24 @@ function exists(dir: string) {
 async function clean(dir: string) {
   Bun.gc(true)
   await sleep(100)
-  await fs.rm(dir, {
-    recursive: true,
-    force: true,
-    maxRetries: 30,
-    retryDelay: 100,
-  })
+  try {
+    await fs.rm(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 30,
+      retryDelay: 100,
+    })
+  } catch {
+    // Windows can hold handles (sqlite, daemon processes) past the in-fs
+    // retries; one long-yield pause then a fresh retry settles the common case.
+    await sleep(1000)
+    await fs.rm(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 30,
+      retryDelay: 100,
+    })
+  }
 }
 
 export async function cleanupTmpdir(dir: string, cleanup = clean) {
