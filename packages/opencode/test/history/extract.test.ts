@@ -68,6 +68,8 @@ describe("history.extract", () => {
   })
 })
 
+// extract() and upsertHistoryBody share previewForIndex (cleanDataUrls + tool-result budget).
+// FTS writes are single-row — no chunk path.
 test("image filename and MIME are searchable without binary payload", () => {
   expect(
     extract({
@@ -77,7 +79,7 @@ test("image filename and MIME are searchable without binary payload", () => {
       url: "data:image/png;base64,YWJj",
     } as any),
   ).toEqual({ body: "designneedle.png image/png", tool_name: null })
-  const result = extract({
+  const r = extract({
     type: "tool",
     tool: "image",
     state: {
@@ -87,8 +89,8 @@ test("image filename and MIME are searchable without binary payload", () => {
       attachments: [{ filename: "diagramneedle.png", mime: "image/png", url: "data:image/png;base64,YWJj" }],
     },
   } as any)
-  expect(result?.body).toContain("diagramneedle.png")
-  expect(result?.body).not.toContain("YWJj")
+  expect(r?.body).toContain("diagramneedle.png")
+  expect(r?.body).not.toContain("YWJj")
 })
 
 test("every declared part variant has an explicit indexing decision", () => {
