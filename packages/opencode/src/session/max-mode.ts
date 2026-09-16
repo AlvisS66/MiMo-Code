@@ -137,6 +137,11 @@ export const runCandidate = (input: MaxStepInput, index: number): Effect.Effect<
     }
 
     const schemaOnly = toSchemaOnlyTools(input.tools)
+    // Propose-only candidates share sessionID and run in parallel, but session.status{retry}
+    // is processor-owned (request-phase llm.stream no longer publishes it). Do NOT set
+    // ephemeral: that flag also skips plugins, session-affinity headers, OTel functionId,
+    // and system assembly. quietRetryDiagnostics only suppresses request-phase RetryAttempt
+    // bus noise from N parallel candidates.
     const stream = input.llm.stream({
       user: input.user,
       sessionID: input.sessionID,
@@ -150,6 +155,7 @@ export const runCandidate = (input: MaxStepInput, index: number): Effect.Effect<
       tools: schemaOnly,
       activeTools: input.activeTools,
       agentID: input.agentID,
+      quietRetryDiagnostics: true,
     })
 
     yield* Stream.runForEach(stream, (event: LLM.Event) => {
@@ -276,6 +282,8 @@ export const judge = (input: MaxStepInput, candidates: Candidate[]): Effect.Effe
 
     let out = ""
     let usage: any | undefined
+    // Judge is ensemble-internal like candidates. session.status{retry} is processor-owned;
+    // quietRetryDiagnostics only — do not set ephemeral (multi-purpose flag).
     const stream = input.llm.stream({
       user: input.user,
       sessionID: input.sessionID,
@@ -288,6 +296,7 @@ export const judge = (input: MaxStepInput, candidates: Candidate[]): Effect.Effe
       tools: {},
       toolChoice: "none",
       agentID: input.agentID,
+      quietRetryDiagnostics: true,
     })
 
     yield* Stream.runForEach(stream, (event: LLM.Event) => {

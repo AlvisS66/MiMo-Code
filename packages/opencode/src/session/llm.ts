@@ -20,7 +20,6 @@ import { Wildcard, ToolCompat } from "@/util"
 import { asSchema } from "@ai-sdk/provider-utils"
 import { SessionID } from "@/session/schema"
 import * as Session from "@/session/session"
-import { SessionStatus } from "@/session/status"
 import { migrateProjectMemory } from "./checkpoint-paths"
 import { ProjectID } from "@/project/schema"
 import { Auth } from "@/auth"
@@ -247,6 +246,12 @@ export type StreamInput = {
   mergeTurnContextIntoLastUser?: boolean
   /** Keep an appended control prompt last while applying provider-specific turn context to the conversation before it. */
   mergeTurnContextBeforeLastMessage?: boolean
+  /**
+   * Propose-only / ensemble draws: skip Session.Event.RetryAttempt on request-phase
+   * ladders. Narrower than `ephemeral` (which also skips plugins, affinity headers,
+   * OTel functionId, and system assembly). session.status is already processor-owned.
+   */
+  quietRetryDiagnostics?: boolean
   ephemeral?: boolean
   requestID?: string
 }
@@ -322,7 +327,6 @@ const live: Layer.Layer<
   | Permission.Service
   | ActorRegistry.Service
   | Memory.Service
-  | SessionStatus.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -333,7 +337,6 @@ const live: Layer.Layer<
     const perm = yield* Permission.Service
     const actorReg = yield* ActorRegistry.Service
     const memory = yield* Memory.Service
-    const status = yield* SessionStatus.Service
 
     const buildSystemArray = Effect.fn("LLM.buildSystemArray")(function* (input: {
       agent: Agent.Info
@@ -973,20 +976,18 @@ const live: Layer.Layer<
                   return Stream.failCause(primaryCause)
                 return Stream.unwrap(
                   Effect.gen(function* () {
-                    const globalAttempt = input.ephemeral ? nextAttempt : yield* status.setRetry(SessionID.make(input.sessionID), {
-                      type: "retry",
-                      attempt: nextAttempt,
-                      phaseAttempt: nextAttempt,
-                      message: decision.message,
-                      next: Date.now() + wait,
-                      phase: "request",
-                      scope: "request",
-                    })
-                    if (!input.ephemeral) yield* Effect.promise(() =>
+                    // Request-phase ladders nest inside processor stream retries. Publishing
+                    // session.status{retry} here restarts a 200ms×4 burst on every outer
+                    // cycle; measured with unreachable baseURL: 4 request + 1 stream per
+                    // cycle ≈ 20 UI frames in 32s (looks nothing like exponential backoff).
+                    // Session status is owned by processor (user-visible wait); request
+                    // attempts stay on Session.Event.RetryAttempt for diagnostics only —
+                    // unless the caller is propose-only ensemble (quietRetryDiagnostics).
+                    if (!input.ephemeral && !input.quietRetryDiagnostics) yield* Effect.promise(() =>
                       Bus.publish(Session.Event.RetryAttempt, {
                         sessionID: SessionID.make(input.sessionID),
                         messageID: input.user.id,
-                        attempt: globalAttempt,
+                        attempt: nextAttempt,
                         phaseAttempt: nextAttempt,
                         maxAttempts: budget.maxRetries ?? 0,
                         phase: "request",
@@ -1021,7 +1022,6 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Plugin.defaultLayer),
     Layer.provide(ActorRegistry.defaultLayer),
     Layer.provide(Memory.defaultLayer),
-    Layer.provide(SessionStatus.defaultLayer),
   ),
 )
 

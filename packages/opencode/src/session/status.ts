@@ -4,6 +4,9 @@ import { InstanceState } from "@/effect"
 import { SessionID } from "./schema"
 import { Effect, Layer, Context } from "effect"
 import z from "zod"
+import { Log } from "@/util"
+
+const slog = Log.create({ service: "session.status" })
 
 export const Info = z
   .union([
@@ -90,7 +93,20 @@ export const layer = Layer.effect(
               phaseAttempt: status.phaseAttempt ?? status.attempt,
             }
           : status
-      if (normalized.type === "retry") data.retryAttempts.set(sessionID, normalized.attempt + 1)
+      if (normalized.type === "retry") {
+        data.retryAttempts.set(sessionID, normalized.attempt + 1)
+        // Density telemetry (debug): UI reconnect streak is built from these frames.
+        // Keep waitMs for field incidents; debug avoids storm-time log flood.
+        slog.debug("session.status retry publish", {
+          sessionID,
+          attempt: normalized.attempt,
+          phaseAttempt: normalized.phaseAttempt,
+          phase: normalized.phase,
+          scope: normalized.scope,
+          message: normalized.message,
+          waitMs: Math.max(0, normalized.next - Date.now()),
+        })
+      }
       yield* bus.publish(Event.Status, { sessionID, status: normalized })
       if (normalized.type === "idle") {
         yield* bus.publish(Event.Idle, { sessionID })
