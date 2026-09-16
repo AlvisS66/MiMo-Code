@@ -2,7 +2,8 @@ import path from "path"
 import os from "os"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
-import { MessageV2 } from "./message-v2"
+import { MessageV2, COMPOSE_REMINDER_MARKER, promoteComposeProtocolFirst } from "./message-v2"
+export { COMPOSE_REMINDER_MARKER }
 import {
   base64ByteSize,
   classifyAttachment,
@@ -172,6 +173,44 @@ export function recallHintLines(toolCfg: ToolStyleConfig | undefined, hasActor =
       : `- actor({ operation: "status", actor_id: "<id>" })`
   // memory has no shell form (no shell.parse) → always JSON.
   return [`- memory({ operation: "search", query: "<keyword>" })`, taskHint, ...(hasActor ? [actorHint] : [])]
+}
+
+// Stable substring markers for user-side synthetic reminders that must be
+// persisted once per message (runLoop reloads msgs from DB every step; bare
+// parts.push re-attaches a new PartID and reorders the user tail → prompt-cache miss).
+// COMPOSE_REMINDER_MARKER re-exported from message-v2 (hydrate promotes it to head).
+export const RECALL_REMINDER_MARKER = "This session has memory at"
+export const LOOP_STREAK_REMINDER_MARKER = "repeating the same action without making progress"
+
+/** True when `parts` already carries a non-ignored synthetic text reminder containing `marker`. */
+export function hasSyntheticReminder(parts: readonly MessageV2.Part[], marker: string): boolean {
+  return parts.some((p) => p.type === "text" && p.synthetic === true && !p.ignored && p.text.includes(marker))
+}
+
+export function buildRecallReminderText(input: { sessMemDir: string; hints: string[] }): string {
+  return [
+    "<system-reminder>",
+    `${RECALL_REMINDER_MARKER} ${input.sessMemDir}/. Recall content`,
+    "not in your context with:",
+    input.hints[0],
+    `- Read(file_path="${input.sessMemDir}/...")`,
+    ...input.hints.slice(1),
+    "",
+    "Don't ask the user about something memory may already record.",
+    "</system-reminder>",
+  ].join("\n")
+}
+
+export function buildLoopStreakReminderText(threshold: number): string {
+  return [
+    "<system-reminder>",
+    `Your last ${threshold} steps have been identical — you appear to be`,
+    `${LOOP_STREAK_REMINDER_MARKER}. Stop and reconsider:`,
+    "the current approach is not working. Try a different strategy, use a",
+    "different tool, or if you are blocked, explain the blocker to the user",
+    "instead of repeating the same step again.",
+    "</system-reminder>",
+  ].join("\n")
 }
 
 // The orchestrator root session is PERSISTENT and coordinates many tasks over
@@ -1214,6 +1253,42 @@ export const layer = Layer.effect(
       return stripped.length > 120 ? stripped.substring(0, 117) + "..." : stripped
     })
 
+    // Persist user-side synthetic reminders once. runLoop reloads `msgs` from
+    // the DB every step — without updatePart the inject vanishes and is
+    // re-pushed after later insertReminders parts, flipping the last-user tail
+    // order and busting provider prompt cache mid-turn. Marker dedupe keeps
+    // multi-step turns from stacking copies (same contract as plan/skill reminders).
+    const ensurePersistedUserSynthetic = Effect.fn("SessionPrompt.ensurePersistedUserSynthetic")(function* (input: {
+      message: MessageV2.WithParts
+      marker: string
+      text: string
+      /**
+       * `head` promotes the compose protocol to parts[0] for this request.
+       * Durable load-order lives in MessageV2.promoteComposeProtocolFirst
+       * (hydrate/parts); this flag only aligns the in-memory slice before
+       * the first DB reload after inject.
+       */
+      position?: "append" | "head"
+    }) {
+      const existingIdx = input.message.parts.findIndex(
+        (p) => p.type === "text" && p.synthetic === true && !p.ignored && p.text.includes(input.marker),
+      )
+      if (existingIdx >= 0) {
+        if (input.position === "head") promoteComposeProtocolFirst(input.message.parts as MessageV2.Part[])
+        return
+      }
+      const part = yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: input.message.info.id,
+        sessionID: input.message.info.sessionID,
+        type: "text" as const,
+        synthetic: true,
+        text: input.text,
+      })
+      input.message.parts.push(part)
+      if (input.position === "head") promoteComposeProtocolFirst(input.message.parts as MessageV2.Part[])
+    })
+
     const insertReminders = Effect.fn("SessionPrompt.insertReminders")(function* (input: {
       messages: MessageV2.WithParts[]
       agent: Agent.Info
@@ -1235,15 +1310,15 @@ export const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         const composeCfg = cfg.compose
         const docsDir = ConfigCompose.resolveDocsDir(ctx.worktree, composeCfg)
-        const text = PROMPT_COMPOSE
-          .replace("{{compose_docs_dir}}", `Save compose skill outputs: specs in \`${path.join(docsDir, "specs")}\`, plans in \`${path.join(docsDir, "plans")}\`, reports in \`${path.join(docsDir, "reports")}\`.`)
-        composeModeMsg.parts.unshift({
-          id: PartID.ascending(),
-          messageID: composeModeMsg.info.id,
-          sessionID: composeModeMsg.info.sessionID,
-          type: "text",
+        const text = PROMPT_COMPOSE.replace(
+          "{{compose_docs_dir}}",
+          `Save compose skill outputs: specs in \`${path.join(docsDir, "specs")}\`, plans in \`${path.join(docsDir, "plans")}\`, reports in \`${path.join(docsDir, "reports")}\`.`,
+        )
+        yield* ensurePersistedUserSynthetic({
+          message: composeModeMsg,
+          marker: COMPOSE_REMINDER_MARKER,
           text,
-          synthetic: true,
+          position: "head",
         })
       }
 
@@ -3919,9 +3994,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // append a brief recall protocol so the agent's reflex to query
           // memory.search / task / actor / Read stays warm across many
           // post-rebuild turns. Cost ~120 tokens per turn, conditional on
-          // hasMemoryOrTasks.
+          // hasMemoryOrTasks. Persisted + marker-deduped so multi-step turns
+          // do not re-push after reload (prompt-cache stability).
           const lastUserMsgForRecall = msgs.findLast((m) => m.info.role === "user")
-          if (lastUserMsgForRecall) {
+          if (lastUserMsgForRecall && !hasSyntheticReminder(lastUserMsgForRecall.parts, RECALL_REMINDER_MARKER)) {
             const hasRecallTarget = yield* checkpoint
               .hasMemoryOrTasks(sessionID)
               .pipe(Effect.catch(() => Effect.succeed(false)))
@@ -3931,23 +4007,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 (yield* config.get()).tool,
                 hasActorTool(yield* agents.get(lastUser.agent)),
               )
-              lastUserMsgForRecall.parts.push({
-                id: PartID.ascending(),
-                messageID: lastUserMsgForRecall.info.id,
-                sessionID,
-                type: "text" as const,
-                synthetic: true,
-                text: [
-                  "<system-reminder>",
-                  `This session has memory at ${sessMemDir}/. Recall content`,
-                  "not in your context with:",
-                  hints[0],
-                  `- Read(file_path="${sessMemDir}/...")`,
-                  ...hints.slice(1),
-                  "",
-                  "Don't ask the user about something memory may already record.",
-                  "</system-reminder>",
-                ].join("\n"),
+              yield* ensurePersistedUserSynthetic({
+                message: lastUserMsgForRecall,
+                marker: RECALL_REMINDER_MARKER,
+                text: buildRecallReminderText({ sessMemDir, hints }),
               })
             }
           }
@@ -4102,8 +4165,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           // Repeated-step nudge: if the last REPEATED_STEP_THRESHOLD finished
           // assistant steps made an identical tool call, the model is likely
-          // stuck looping. Inject a synthetic reminder on the last user message
-          // asking it to change approach, deduped per build.
+          // stuck looping. Persist a synthetic reminder on the last user
+          // message (marker-deduped; DB reload must not re-push every step).
           if (lastFinished) {
             const recentSignatures: string[] = []
             for (let i = msgs.length - 1; i >= 0 && recentSignatures.length < REPEATED_STEP_THRESHOLD; i--) {
@@ -4118,27 +4181,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               recentSignatures.every((sig) => sig === recentSignatures[0])
             if (repeating) {
               const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
-              if (
-                lastUserMsg &&
-                !lastUserMsg.parts.some(
-                  (p) => p.type === "text" && p.text?.includes("repeating the same action"),
-                )
-              ) {
-                lastUserMsg.parts.push({
-                  id: PartID.ascending(),
-                  messageID: lastUserMsg.info.id,
-                  sessionID,
-                  type: "text",
-                  synthetic: true,
-                  text: [
-                    "<system-reminder>",
-                    `Your last ${REPEATED_STEP_THRESHOLD} steps have been identical — you appear to be`,
-                    "repeating the same action without making progress. Stop and reconsider:",
-                    "the current approach is not working. Try a different strategy, use a",
-                    "different tool, or if you are blocked, explain the blocker to the user",
-                    "instead of repeating the same step again.",
-                    "</system-reminder>",
-                  ].join("\n"),
+              if (lastUserMsg) {
+                yield* ensurePersistedUserSynthetic({
+                  message: lastUserMsg,
+                  marker: LOOP_STREAK_REMINDER_MARKER,
+                  text: buildLoopStreakReminderText(REPEATED_STEP_THRESHOLD),
                 })
               }
             }
