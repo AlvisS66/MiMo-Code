@@ -247,10 +247,8 @@ MiMoCode bundles the following builtin skills:
 | `compose-next` | Recommended spec→ship feature delivery workflow; invoke only when explicitly requested by the user |
 | `data-analytics` | Analyze product and business data through reusable workflows for data quality, KPIs, dashboards, reports, notebooks, and market sizing |
 | `deep-research` | Produce cited, multi-source research reports with parallel subagents and built-in web tools |
-| `design-blueprint` | Produce a design blueprint (DESIGN.md + Decision Trace) before mocking up visuals |
 | `docx-official` | Produce, read, and transform Word (.docx) files |
 | `evolve` | Total self-modification — rewrite any layer of the agent: tools, behavior hooks, knowledge, workflows, even the UI |
-| `frontend-design` | Visual design guidance for UI work |
 | `html-to-video-pipeline` | HTML-to-MP4 rendering via headless browser + ffmpeg |
 | `learn-everything` | Turn documents, URLs, or topics into adaptive courses with exercises, feedback, and progress tracking |
 | `loop` | Schedule recurring prompts on a fixed cadence |

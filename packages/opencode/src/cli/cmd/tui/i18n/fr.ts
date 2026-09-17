@@ -274,7 +274,6 @@ export const dict = {
   "tui.skill.pptx-official.description": "Créer, modifier et lire des présentations Microsoft PowerPoint (.pptx)",
   "tui.skill.mimocode.description": "Documentation intégrée des fonctionnalités, config et commandes MiMoCode",
   "tui.skill.evolve.description": "Réécrivez chaque couche de vous-même — outils, hooks, connaissances, workflows, même l'UI",
-  "tui.skill.frontend-design.description": "Conseils pour un design d'interface visuel distinctif et intentionnel",
   "tui.skill.loop.description": "Planifier l'exécution récurrente d'un prompt",
   "tui.skill.html-to-video-pipeline.description": "L'arme ultime pour vidéos courtes — créez des vidéos courtes avec du HTML",
   "tui.skill.arxiv.description": "Rechercher, citer, télécharger et suivre des articles arXiv",
@@ -284,8 +283,6 @@ export const dict = {
   "tui.skill.codex.description": "Exécuter Codex CLI de façon autonome dans les scripts, la CI, Docker et Kubernetes",
   "tui.skill.claude-code.description": "Déléguer des tâches de programmation à Claude Code CLI",
   "tui.skill.grok-build.description": "Utiliser Grok Build depuis la ligne de commande",
-  "tui.skill.design-blueprint.description":
-    "Produire un plan de design (DESIGN.md + Decision Trace) avant tout mockup",
   "tui.skill.super-research.description":
     "Recherche autonome — expériences, revues, analyse quantitative, benchmarks, RCA, ablation, reproduction & rédaction d'articles",
   "tui.skill.deep-research.description":
