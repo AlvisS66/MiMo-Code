@@ -311,6 +311,20 @@ test("loads project config from Cygwin paths on Windows", async () => {
   })
 })
 
+test("ignores removed auto_worktree without changing other config", async () => {
+  await using tmp = await tmpdir({
+    init: (dir) => writeConfig(dir, { $schema: "https://opencode.ai/config.json", model: "test/model", auto_worktree: true }),
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const config = await load()
+      expect(config.model).toBe("test/model")
+      expect(config).not.toHaveProperty("auto_worktree")
+    },
+  })
+})
+
 test("ignores legacy tui keys in opencode config", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
