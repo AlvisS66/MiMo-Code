@@ -60,6 +60,7 @@ import { reply, TestLLMServer } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { Metrics } from "../../src/metrics"
 import { Database, eq } from "../../src/storage"
+import { prefixCaptureRef } from "../../src/session/prefix-capture-ref"
 import { SessionPrefixSnapshotTable } from "../../src/session/session.sql"
 
 void Log.init({ print: false })
@@ -206,7 +207,7 @@ const lsp = Layer.succeed(
 const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
 const run = SessionRunState.layer.pipe(Layer.provide(status))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
-function makeHttp(mcpService = mcp) {
+function makeHttp(mcpService = mcp, providerLayer = ProviderSvc.defaultLayer) {
   const taskRegistry = ActorRegistry.defaultLayer
   const deps = Layer.mergeAll(
     Session.defaultLayer,
@@ -218,7 +219,7 @@ function makeHttp(mcpService = mcp) {
     Permission.defaultLayer,
     Plugin.defaultLayer,
     Config.defaultLayer,
-    ProviderSvc.defaultLayer,
+    providerLayer,
     lsp,
     mcpService,
     AppFileSystem.defaultLayer,
@@ -1640,6 +1641,92 @@ it.live("loop continues when finish is tool-calls", () =>
     { git: true, config: providerCfg },
   ),
 )
+
+for (const isError of [false, true]) {
+  const screenshots = Array.from({ length: 51 }, () => ({
+    type: "image" as const,
+    data: mcpErrorImage,
+    mimeType: "image/png",
+  }))
+  const screenshotsIt = testEffect(
+    makeHttp(
+      mcpLayer(() => ({
+        mcp_screenshots: dynamicTool({
+          description: "Capture screenshots",
+          inputSchema: jsonSchema({ type: "object", properties: {} }),
+          execute: async () => ({
+            content: [{ type: "text", text: isError ? "Capture failed" : "Captured" }, ...screenshots],
+            isError,
+          }),
+        }),
+      })),
+    ),
+  )
+
+  screenshotsIt.live(`Responses preserves 51 MCP screenshots through followup and resume (error=${isError})`, () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({
+          title: "Pinned",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: mcpRef,
+          noReply: true,
+          parts: [{ type: "text", text: "Capture screenshots" }],
+        })
+        yield* llm.tool("mcp_tool_search", { query: "screenshots" })
+        yield* llm.tool("mcp_screenshots", {})
+        yield* llm.text("Screenshots received")
+        yield* prompt.loop({ sessionID: session.id })
+
+        const part = (yield* MessageV2.filterCompactedEffect(session.id))
+          .flatMap((message) => message.parts)
+          .find((part) => part.type === "tool" && part.tool === "mcp_screenshots")
+        if (part?.type !== "tool") throw new Error("Expected screenshot tool result")
+        expect(part.state.status).toBe(isError ? "error" : "completed")
+        const assertImages = (request: Record<string, unknown>) => {
+          expect(request.input).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "function_call_output",
+                call_id: part.callID,
+                output: [
+                  { type: "input_text", text: isError ? "Tool failed: Capture failed" : "Captured" },
+                  ...screenshots.map(() => ({ type: "input_image", image_url: mcpErrorImageURL })),
+                ],
+              }),
+            ]),
+          )
+          expect(JSON.stringify(request)).not.toContain(MessageV2.SYNTHETIC_ATTACHMENT_PROMPT)
+        }
+        assertImages((yield* llm.inputs).at(-1)!)
+        yield* llm.text("History received")
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: mcpRef,
+          parts: [{ type: "text", text: "Inspect the previous screenshots again" }],
+        })
+        assertImages((yield* llm.inputs).at(-1)!)
+      }),
+      {
+        git: true,
+        config: (url) => {
+          const config = mediaProviderCfg(url)
+          return {
+            ...config,
+            provider: { ...config.provider, test: { ...config.provider.test, npm: "@ai-sdk/openai" } },
+          }
+        },
+      },
+    ),
+  )
+}
 
 mcpIt.live("MCP isError becomes a tool error without losing standard result fields", () =>
   provideTmpdirServer(
@@ -3377,3 +3464,57 @@ it.live(
     ),
   30_000,
 )
+
+for (const failure of ["throw", "rejection", "interruption"] as const) {
+  let resolutions = 0
+  const failingProvider = Layer.effect(
+    ProviderSvc.Service,
+    Effect.gen(function* () {
+      const provider = yield* ProviderSvc.Service
+      return ProviderSvc.Service.of({
+        ...provider,
+        getLanguage: () => {
+          resolutions++
+          if (failure === "interruption") return Effect.interrupt
+          return failure === "throw"
+            ? Effect.sync(() => {
+                throw new Error("test adapter unavailable")
+              })
+            : Effect.promise(() => Promise.reject(new Error("test adapter unavailable")))
+        },
+      })
+    }),
+  ).pipe(Layer.provide(ProviderSvc.defaultLayer))
+
+  testEffect(makeHttp(mcp, failingProvider)).live(`checkpoint prefix capture soft-fails adapter ${failure}`, () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* () {
+        yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({ title: "Pinned" })
+        yield* user(chat.id, "inspect")
+        const before = resolutions
+        const capture = prefixCaptureRef.current!
+        expect(capture).toBeDefined()
+        const result = yield* Effect.exit(
+          capture({
+            sessionID: chat.id,
+            agentName: "build",
+            ...ref,
+            msgs: yield* sessions.messages({ sessionID: chat.id }),
+          }),
+        )
+        expect(resolutions).toBe(before + 1)
+        if (failure === "interruption") {
+          expect(Exit.isFailure(result) && Cause.hasInterrupts(result.cause)).toBe(true)
+        } else {
+          expect(Exit.isSuccess(result)).toBe(true)
+          if (Exit.isSuccess(result))
+            expect(result.value).toEqual({ system: [], tools: {}, inheritedMessages: [], parentPermission: [] })
+        }
+        expect(yield* sessions.messages({ sessionID: chat.id })).toHaveLength(1)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+}

@@ -658,11 +658,25 @@ export const layer = Layer.effect(
                 ...(Flag.MIMOCODE_DISABLE_INSTRUCTIONS ? [] : instructions.content),
               ]
             })
+        // Prefix capture is best-effort. Adapter loading can die (including SDK
+        // promise rejection); do not abort checkpoint creation or capture a
+        // differently routed prefix when it cannot be resolved.
+        const language = yield* provider
+          .getLanguage(model)
+          .pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterrupts(cause)
+                ? Effect.failCause(cause)
+                : elog.warn("checkpoint adapter resolution failed", { cause }).pipe(Effect.as(undefined)),
+            ),
+          )
+        if (!language) return empty
         const prefix = yield* buildLLMRequestPrefix({
           sessionID: input.sessionID,
           agent: ag,
           model,
           msgs: captureMessages,
+          languageProvider: language.provider,
           additions,
           prebuiltSystem: frozen?.system,
           prompt: capturePrompt,
@@ -4517,7 +4531,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               const ownNew = msgs.filter(
                 (m) => m.info.id > forkCtx.watermarkMsgID && m.info.agentID === lastUser.agentID,
               )
-              const ownNewModelMsgs = yield* MessageV2.toModelMessagesEffect(ownNew, model)
+              const ownNewModelMsgs = yield* MessageV2.toModelMessagesEffect(ownNew, model, {
+                languageProvider: (yield* provider.getLanguage(model)).provider,
+              })
               const prebuiltSystem = forkCtx.system
               lastSystemPrompt = prebuiltSystem
               const modelMsgs: ModelMessage[] = [...forkCtx.inheritedMessages, ...ownNewModelMsgs]
@@ -4750,6 +4766,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               sessionID,
               agent,
               model,
+              languageProvider: (yield* provider.getLanguage(model)).provider,
               msgs,
               additions: frozen ? [] : yield* currentAdditions(),
               prebuiltSystem: frozen?.system,
@@ -4780,6 +4797,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 sessionID,
                 agent,
                 model,
+                languageProvider: (yield* provider.getLanguage(model)).provider,
                 msgs,
                 additions: yield* currentAdditions(),
                 prompt: sessionPrompt,
