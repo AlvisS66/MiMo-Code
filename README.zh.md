@@ -238,10 +238,8 @@ MiMoCode 打包了以下内置技能：
 | `compose-next` | 推荐的 spec→ship 功能交付工作流；仅在用户明确授意时调用 |
 | `data-analytics` | 通过数据质量、KPI、仪表盘、报告、Notebook 和市场规模测算等工作流分析产品与业务数据 |
 | `deep-research` | 使用并行子智能体和内置 Web 工具生成带引用的多源深度调研报告 |
-| `design-blueprint` | 动手做视觉前先出设计蓝图（DESIGN.md + 决策轨迹）|
 | `docx-official` | 生成、读取和转换 Word (.docx) 文件 |
 | `evolve` | 全面自我修改——改写 Agent 的任意层面：工具、行为钩子、知识、工作流，乃至界面本身 |
-| `frontend-design` | UI 开发的视觉设计指导 |
 | `html-to-video-pipeline` | 通过无头浏览器 + ffmpeg 将 HTML 渲染为 MP4 |
 | `learn-everything` | 将文档、URL 或主题转化为包含练习、反馈和进度追踪的自适应课程 |
 | `loop` | 按固定周期调度循环提示 |

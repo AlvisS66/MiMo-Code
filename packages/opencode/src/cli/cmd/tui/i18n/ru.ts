@@ -288,7 +288,6 @@ export const dict = {
   "tui.skill.pptx-official.description": "Создание, редактирование и чтение презентаций Microsoft PowerPoint (.pptx)",
   "tui.skill.mimocode.description": "Самодокументация функций, конфигурации и команд MiMoCode",
   "tui.skill.evolve.description": "Перепишите любой свой слой — инструменты, hooks, знания, workflows и даже UI",
-  "tui.skill.frontend-design.description": "Руководство по выразительному, осмысленному визуальному дизайну UI",
   "tui.skill.loop.description": "Запланировать запуск промпта с периодичностью",
   "tui.skill.html-to-video-pipeline.description": "Магический инструмент для коротких видео — создавайте короткие видео с помощью HTML",
   "tui.skill.arxiv.description": "Поиск, цитирование, загрузка и отслеживание статей arXiv",
@@ -298,8 +297,6 @@ export const dict = {
   "tui.skill.codex.description": "Автономный запуск Codex CLI в скриптах, CI, Docker и Kubernetes",
   "tui.skill.claude-code.description": "Делегирование задач программирования Claude Code CLI",
   "tui.skill.grok-build.description": "Работа с Grok Build из командной строки",
-  "tui.skill.design-blueprint.description":
-    "Создать проектную спецификацию (DESIGN.md + Decision Trace) до макетов",
   "tui.skill.super-research.description":
     "Автономные исследования — эксперименты, обзоры, количественный анализ, бенчмарки, RCA, абляция, воспроизведение и написание статей",
   "tui.skill.deep-research.description":

@@ -42,23 +42,23 @@ describe("skillDescription", () => {
   })
 
   test("returns localized slash aliases only for bundled skills", () => {
-    const translate = (key: string) => ({ "tui.skill.frontend-design.slash": "前端设计|界面设计" })[key] as string
-    expect(skillSlashAliases(translate, "frontend-design", true)).toEqual(["前端设计", "界面设计"])
-    expect(skillSlashAliases(translate, "frontend-design", false)).toEqual([])
+    const translate = (key: string) => ({ "tui.skill.product-design.slash": "产品设计|界面设计" })[key] as string
+    expect(skillSlashAliases(translate, "product-design", true)).toEqual(["产品设计", "界面设计"])
+    expect(skillSlashAliases(translate, "product-design", false)).toEqual([])
   })
 
   test("resolves a localized slash alias to its bundled skill name", () => {
-    const translate = (key: string) => ({ "tui.skill.frontend-design.slash": "前端设计" })[key] as string
+    const translate = (key: string) => ({ "tui.skill.product-design.slash": "产品设计" })[key] as string
     expect(
-      resolveSkillSlash(translate, "前端设计", [
-        { name: "frontend-design", source: "skill", bundled: true },
+      resolveSkillSlash(translate, "产品设计", [
+        { name: "product-design", source: "skill", bundled: true },
         { name: "other", source: "skill", bundled: true },
       ]),
-    ).toBe("frontend-design")
-    expect(resolveSkillSlash(translate, "前端设计", [{ name: "frontend-design", source: "command", bundled: true }])).toBe(
-      "frontend-design",
+    ).toBe("product-design")
+    expect(resolveSkillSlash(translate, "产品设计", [{ name: "product-design", source: "command", bundled: true }])).toBe(
+      "product-design",
     )
-    expect(resolveSkillSlash(translate, "前端设计", [{ name: "frontend-design", source: "skill" }])).toBeUndefined()
+    expect(resolveSkillSlash(translate, "产品设计", [{ name: "product-design", source: "skill" }])).toBeUndefined()
   })
 
   test("every localized bundled skill has a unique Chinese slash alias", () => {
