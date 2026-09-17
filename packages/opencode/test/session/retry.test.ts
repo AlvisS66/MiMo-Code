@@ -7,6 +7,7 @@ import { ConfigRetry } from "../../src/config/retry"
 import { SessionRetry, decide, isRetryableTransientError, retryable } from "../../src/session/retry"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ProviderID } from "../../src/provider/schema"
+import { ProviderError } from "../../src/provider"
 import { allowsModelNotFoundRetry } from "../../src/provider/error"
 import { AppRuntime } from "../../src/effect/app-runtime"
 import { SessionID } from "../../src/session/schema"
@@ -199,14 +200,61 @@ describe("session.retry.retryable", () => {
     expect(resolved.stream.maxRetries).toBe(12)
   })
 
-  test("selects a long network budget without widening request server retries", () => {
+  test("defaults: unknown stays bounded; network/rateLimit/server are persistent", () => {
     const resolved = SessionRetry.resolve(undefined, "test")
-    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "stream", scope: "live-step", kind: "network", message: "reset" }).mode).toBe("persistent")
-    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "server", message: "503" }).maxRetries).toBe(4)
-    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "network", message: "reset" }).maxRetries).toBe(4)
     expect(resolved.unknown).toMatchObject({ maxRetries: 8, maxElapsedMs: 15 * 60_000 })
     expect(resolved.request.jitterRatio).toBe(0.1)
-    expect(resolved.network.jitterRatio).toBe(0)
+    expect(resolved.network).toMatchObject({ mode: "persistent", maxRetries: undefined, maxElapsedMs: 0, jitterRatio: 0 })
+    expect(resolved.rateLimit.mode).toBe("persistent")
+    expect(resolved.rateLimit.maxRetries).toBeUndefined()
+    expect(resolved.server.mode).toBe("persistent")
+    expect(resolved.server.maxRetries).toBeUndefined()
+  })
+
+  test("network / rate_limit / server stay persistent even in request phase", () => {
+    const resolved = SessionRetry.resolve(undefined, "test")
+    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "stream", scope: "live-step", kind: "network", message: "reset" }).mode).toBe("persistent")
+    const requestNetwork = SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "network", message: "ENOTFOUND" })
+    expect(requestNetwork.mode).toBe("persistent")
+    expect(requestNetwork.maxRetries).toBeUndefined()
+    expect(requestNetwork.maxElapsedMs).toBe(0)
+    const requestServer = SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "server", message: "503" })
+    expect(requestServer.mode).toBe("persistent")
+    const requestRateLimit = SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "rate_limit", message: "429" })
+    expect(requestRateLimit.mode).toBe("persistent")
+    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "request", scope: "request", kind: "unknown", message: "x" }).maxRetries).toBe(4)
+    expect(SessionRetry.budgetFor(resolved, { retryable: true, phase: "stream", scope: "max-candidate", kind: "network", message: "reset" }).maxRetries).toBe(3)
+  })
+
+  test("classifies ENOTFOUND / Cannot connect to API as network", () => {
+    const dns = new Error("Cannot connect to API: getaddrinfo ENOTFOUND example.internal.srv")
+    ;(dns as Error & { code?: string }).code = "ENOTFOUND"
+    const decision = decide(dns)
+    expect(decision.retryable).toBe(true)
+    expect(decision.kind).toBe("network")
+    expect(ProviderError.isRetryableNetworkError(dns)).toBe(true)
+    expect(decide(new Error("getaddrinfo EAI_AGAIN example.internal.srv")).kind).toBe("network")
+  })
+
+  test("transport classification is shape-based, not a closed code allow-list", () => {
+    // Unlisted undici code still transport
+    const undici = Object.assign(new Error("other side closed"), { code: "UND_ERR_CLOSED" })
+    expect(ProviderError.isTransportErrnoCode("UND_ERR_CLOSED")).toBe(true)
+    expect(ProviderError.isRetryableNetworkError(undici)).toBe(true)
+    // Unlisted network errno family still transport
+    expect(ProviderError.isTransportErrnoCode("ECONNREFUSED")).toBe(true)
+    expect(ProviderError.isTransportErrnoCode("EAI_NODATA")).toBe(true)
+    expect(ProviderError.isTransportErrnoCode("ENETRESET")).toBe(true)
+    // Local fs/process errors are NOT transport
+    expect(ProviderError.isTransportErrnoCode("ENOENT")).toBe(false)
+    expect(ProviderError.isTransportErrnoCode("EACCES")).toBe(false)
+    expect(ProviderError.isTransportErrnoCode("EINVAL")).toBe(false)
+    expect(ProviderError.isRetryableNetworkError(Object.assign(new Error("missing"), { code: "ENOENT" }))).toBe(false)
+    // User abort is never network
+    expect(ProviderError.isRetryableNetworkError(Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR" }))).toBe(false)
+    // Nested cause chain: outer message clean, inner code is transport
+    const nested = new Error("request failed", { cause: Object.assign(new Error("boom"), { code: "ECONNRESET" }) })
+    expect(ProviderError.isRetryableNetworkError(nested)).toBe(true)
   })
 
   test("caps retry-after by the selected budget", () => {
