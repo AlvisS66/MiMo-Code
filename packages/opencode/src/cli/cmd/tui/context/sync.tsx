@@ -557,6 +557,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           }
           break
         }
+        case "session.error": {
+          // Clear recovery-active only when not busy/retry/notice (async resume reject while idle).
+          // Mid-turn errors must not wipe a live recovery badge.
+          const errSid = event.properties.sessionID
+          if (!errSid) break
+          const errStatus = store.session_status[errSid]?.type
+          if (errStatus === undefined || errStatus === "idle") {
+            setStore("session_recovery_active", errSid, undefined)
+          }
+          break
+        }
 
         case "session.goal": {
           // Merge: a clear event (goal:undefined) keeps the accumulated verdicts

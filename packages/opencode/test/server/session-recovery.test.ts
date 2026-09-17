@@ -63,7 +63,11 @@ describe("session turn recovery routes", () => {
         const query = `?directory=${encodeURIComponent(tmp.path)}`
         const resumeQuery = `${query}&titleLocale=fr-FR`
         const listed = yield* Effect.promise(() => Promise.resolve(app.request(`/session/${session.id}/recovery${query}`)))
-        const candidates = yield* Effect.promise(() => listed.json() as Promise<Array<{ assistantMessageID: string; parentMessageID: string; created: number }>>)
+        const candidates = yield* Effect.promise(() =>
+          listed.json() as Promise<
+            Array<{ assistantMessageID: string; parentMessageID: string; created: number }>
+          >,
+        )
         const missing = yield* Effect.promise(() =>
           Promise.resolve(app.request(`/session/${session.id}/turn/${MessageID.ascending()}/resume${resumeQuery}`, { method: "POST" })),
         )
@@ -71,21 +75,59 @@ describe("session turn recovery routes", () => {
         yield* Effect.promise(() =>
           Promise.race([errorSeen, new Promise((resolve) => setTimeout(resolve, 10_000))]),
         )
+        // post-resume observable signals (not pre-resume candidates)
+        yield* Effect.sleep("150 millis")
+        const afterListed = yield* Effect.promise(() =>
+          Promise.resolve(app.request(`/session/${session.id}/recovery${query}`)),
+        )
+        const afterCandidates = yield* Effect.promise(() =>
+          afterListed.json() as Promise<Array<{ assistantMessageID: string }>>,
+        )
         unsubscribe()
         const after = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
         const abandoned = after.find((item) => item.info.id === assistant.id)?.info
         const abandonedAssistant = abandoned?.role === "assistant" ? abandoned : undefined
-        return { listed: listed.status, candidates, resumed: resumed.status, missing: missing.status, userID: user.id, errors, abandoned: abandonedAssistant }
+        return {
+          listed: listed.status,
+          candidates,
+          resumed: resumed.status,
+          missing: missing.status,
+          userID: user.id,
+          errors,
+          abandoned: abandonedAssistant,
+          shellRemoved: abandoned === undefined,
+          afterNoLongerListsShell: !afterCandidates.some((c) => c.assistantMessageID === assistant.id),
+          afterMessageCount: after.length,
+          afterMessages: after.map((m) => ({ info: { role: m.info.role, id: m.info.id } })),
+        }
       })),
     })
 
     expect(result.listed).toBe(200)
-    expect(result.candidates).toEqual([{ assistantMessageID: expect.any(String), parentMessageID: result.userID, created: expect.any(Number) }])
+    expect(result.candidates).toEqual([
+      {
+        assistantMessageID: expect.any(String),
+        parentMessageID: result.userID,
+        created: expect.any(Number),
+      },
+    ])
+    // [TP-SR-R21-16] HTTP resume admitted (202) and empty residue shell cleaned
     expect(result.resumed).toBe(202)
     expect(result.missing).toBe(404)
-    expect(result.errors.length).toBeGreaterThan(0)
-    expect(result.abandoned?.time.completed).toEqual(expect.any(Number))
-    expect(result.abandoned?.error?.data.message).toContain("Abandoned")
+    expect(result.shellRemoved).toBe(true)
+    // Both must hold for empty-tail resume; not an OR against pre-resume candidates.
+    expect(result.afterNoLongerListsShell).toBe(true)
+    // Work proof independent of shellRemoved: session error bus fired (runLoop without provider)
+    // OR a new assistant message appeared after cleanup.
+    const newAssistants = result.afterMessages.filter(
+      (m: { info: { role: string; id: string } }) => m.info.role === "assistant",
+    )
+    expect(result.errors.length > 0 || newAssistants.length > 0).toBe(true)
+    if (result.abandoned?.error) {
+      const err = result.abandoned.error as { data?: { message?: string } }
+      const abandonMsg = err.data?.message ?? ""
+      expect(abandonMsg).not.toContain("Abandoned: resumed as a new assistant turn")
+    }
   })
 })
 
@@ -116,8 +158,8 @@ test("SDK serializes resume titleLocale in the query string", async () => {
   expect(captured!.body).toBeNull()
 })
 
-// [TP-SR-R21-07] 恢复判据:completed+tool-calls / completed+length / 无 completed 均为候选;
-// completed+stop / completed+other 不进候选。
+// [TP-SR-R21-07] Recovery predicate: completed+tool-calls / completed+length / no completed are candidates;
+// completed+stop / completed+other are not.
 describe("recovery candidate predicate", () => {
   async function setupAssistant(overrides: Partial<{ finish: string; completed: boolean; error: boolean }>) {
     await using tmp = await tmpdir({ git: true })
@@ -186,20 +228,20 @@ describe("recovery candidate predicate", () => {
     expect(result.candidates.length).toBe(0)
   })
 
-  // [Finding #1 回归] finish=stop 但有 error:processor 因 error 不写 completed → 可恢复。
+  // [Finding #1 regression] finish=stop but error set: processor does not write completed on error => recoverable.
   test("finish=stop + error → candidate (error means not completed)", async () => {
     const result = await setupAssistant({ completed: false, finish: "stop", error: true })
     expect(result.candidates.length).toBe(1)
   })
 
-  // error + 无 completed:任何 finish 都是候选(有 error = 没完成)。
+  // error + no completed: any finish is a candidate (error means not finished).
   test("error + no completed → candidate", async () => {
     const result = await setupAssistant({ completed: false, error: true })
     expect(result.candidates.length).toBe(1)
   })
 })
 
-// [TP-SR-R21-08] model 参数校验:modelProviderID / modelID 必须同时提供。
+// [TP-SR-R21-08] model params: modelProviderID / modelID must be provided together.
 test("resume with only modelProviderID returns 400", async () => {
   await using tmp = await tmpdir({ git: true })
   const result = await Instance.provide({

@@ -528,6 +528,9 @@ export function Session() {
       { sessionID: route.sessionID, assistantMessageID: candidate.assistantMessageID, titleLocale: language.intl() },
       { throwOnError: true },
     )
+    // 202 = engine accepted; both resume kinds start a run. Do not GET recovery here:
+    // recovery without allowBusy returns [] while busy, which would false-report "nothing to recover".
+    // Clearing relies on session.status→idle / session.error (see sync.tsx).
     sync.set("session_recovery_active", route.sessionID, candidate.assistantMessageID)
     toast.show({ message: t("tui.toast.session.recover.started"), variant: "info" })
   }
