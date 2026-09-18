@@ -42,6 +42,130 @@ interface GitResult {
   readonly stderr: string
 }
 
+// Git C-quotes paths containing quotes, backslashes, or control characters
+// even with core.quotepath=false: "..." with \" \\ \a \b \t \n \v \f \r and
+// \NNN octal escapes for the remaining control characters. numstat/name-status
+// rows and diff ---/+++ headers quote the same path differently (bare vs
+// a//b-prefixed), so comparing them requires the decoded real name on both
+// sides.
+function unquoteGitPath(path: string): string {
+  if (!path.startsWith('"') || !path.endsWith('"') || path.length < 2) return path
+  const body = path.slice(1, -1)
+  let out = ""
+  for (let i = 0; i < body.length; i++) {
+    const char = body[i]
+    if (char !== "\\") {
+      out += char
+      continue
+    }
+    const next = body[++i]
+    if (next === undefined) break
+    if (next === "a") out += "\x07"
+    else if (next === "b") out += "\b"
+    else if (next === "t") out += "\t"
+    else if (next === "n") out += "\n"
+    else if (next === "v") out += "\v"
+    else if (next === "f") out += "\f"
+    else if (next === "r") out += "\r"
+    else if (next === '"' || next === "\\") out += next
+    else if (next >= "0" && next <= "7") {
+      // Octal escapes are always three digits (\NNN).
+      const oct = body.slice(i, i + 3)
+      if (oct.length === 3 && /^[0-7]{3}$/.test(oct)) {
+        out += String.fromCharCode(Number.parseInt(oct, 8))
+        i += 2
+      } else out += next
+    } else out += next
+  }
+  return out
+}
+
+// Normalize raw `git diff` output into the jsdiff formatPatch shape the UI
+// parses: strip the diff --git / index / mode header lines, drop the a/ and
+// b/ prefixes, and replace /dev/null with the real path taken from the other
+// side (jsdiff always uses the file name on both sides). Hunk bodies —
+// including "\ No newline at end of file" markers and CRLF content — pass
+// through untouched, so the hunk text stays byte-identical to jsdiff.
+function parseGitPatch(text: string): Map<string, string> {
+  const out = new Map<string, string>()
+  let file: string | undefined
+  let head: string[] = []
+  let hunks: string[] = []
+  let inHunks = false
+  const flush = () => {
+    if (file && hunks.length > 0) {
+      // jsdiff always writes the file name on both --- and +++ sides; swap out
+      // git's /dev/null placeholders now that the real name is known.
+      const fixed = head.map((h) =>
+        h.startsWith("--- /dev/null") || h.startsWith("+++ /dev/null") ? `${h.slice(0, 4)}${file}\t` : h,
+      )
+      // jsdiff writes "@@ -a,b +c,d @@" with explicit lengths and no section
+      // suffix; git elides ",1" and may append a function-context suffix.
+      const normalized = hunks.map((line) => {
+        const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line)
+        if (!match) return line
+        const [, aStart, aLen, bStart, bLen] = match
+        return `@@ -${aStart},${aLen ?? 1} +${bStart},${bLen ?? 1} @@`
+      })
+      out.set(file, [`Index: ${file}`, "=".repeat(67), ...fixed, ...normalized].join("\n") + "\n")
+    }
+    file = undefined
+    head = []
+    hunks = []
+    inHunks = false
+  }
+
+  const lines = text.split("\n")
+  if (lines.at(-1) === "") lines.pop()
+  for (const raw of lines) {
+    if (raw.startsWith("diff --git ")) {
+      flush()
+      continue
+    }
+    if (!inHunks) {
+      // Metadata lines are git-generated, so any trailing \r is noise; hunk
+      // body lines keep theirs (it belongs to the file content).
+      const line = raw.replace(/\r$/, "")
+      if (
+        line.startsWith("index ") ||
+        line.startsWith("old mode ") ||
+        line.startsWith("new mode ") ||
+        line.startsWith("new file mode ") ||
+        line.startsWith("deleted file mode ") ||
+        line.startsWith("similarity index ") ||
+        line.startsWith("dissimilarity index ") ||
+        line.startsWith("copy ") ||
+        line.startsWith("rename ")
+      ) {
+        continue
+      }
+      if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+        const side = line.slice(0, 4)
+        // Decode C-quoted paths first — the a//b prefix sits inside the
+        // quotes — then strip it, so keys match the numstat rows' real names.
+        const body = unquoteGitPath(line.slice(4))
+        const named =
+          body === "/dev/null"
+            ? undefined
+            : body.startsWith("a/") || body.startsWith("b/")
+              ? body.slice(2)
+              : body
+        file ??= named
+        head.push(`${side}${named ?? file ?? body}\t`)
+        continue
+      }
+      if (line.startsWith("@@")) {
+        inHunks = true
+        hunks.push(line)
+      }
+      continue
+    }
+    hunks.push(raw)
+  }
+  flush()
+  return out
+}
+
 type State = Omit<Interface, "init">
 
 export interface Interface {
@@ -52,7 +176,8 @@ export interface Interface {
   readonly restore: (snapshot: string) => Effect.Effect<void>
   readonly revert: (patches: Patch[]) => Effect.Effect<void>
   readonly diff: (hash: string) => Effect.Effect<string>
-  readonly diffFull: (from: string, to: string) => Effect.Effect<FileDiff[]>
+  readonly diffFull: (from: string, to: string, options?: { patch?: boolean }) => Effect.Effect<FileDiff[]>
+  readonly diffFullPatched: (from: string, to: string) => Effect.Effect<FileDiff[]>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Snapshot") {}
@@ -509,23 +634,82 @@ export const layer: Layer.Layer<
           )
         })
 
-        const diffFull = Effect.fnUntraced(function* (from: string, to: string) {
+        type Row = {
+          file: string
+          status: "added" | "deleted" | "modified"
+          binary: boolean
+          additions: number
+          deletions: number
+        }
+
+        type Ref = {
+          file: string
+          side: "before" | "after"
+          ref: string
+        }
+
+        const diffStats = (row: Row): FileDiff => ({
+          file: row.file,
+          patch: "",
+          additions: row.additions,
+          deletions: row.deletions,
+          status: row.status,
+        })
+
+        // Shared pre-patch pipeline: name-status + numstat + ignore filtering.
+        const rowsOf = Effect.fnUntraced(function* (from: string, to: string) {
+          const status = new Map<string, "added" | "deleted" | "modified">()
+
+          const statuses = yield* git(
+            [...quote, ...args(["diff", "--no-ext-diff", "--name-status", "--no-renames", from, to, "--", "."])],
+            { cwd: state.directory },
+          )
+
+          for (const line of statuses.text.trim().split("\n")) {
+            if (!line) continue
+            const [code, file] = line.split("\t")
+            if (!code || !file) continue
+            status.set(unquoteGitPath(file), code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified")
+          }
+
+          const numstat = yield* git(
+            [...quote, ...args(["diff", "--no-ext-diff", "--no-renames", "--numstat", from, to, "--", "."])],
+            {
+              cwd: state.directory,
+            },
+          )
+
+          const rows = numstat.text
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .flatMap((line) => {
+              const [adds, dels, file] = line.split("\t")
+              if (!file) return []
+              const name = unquoteGitPath(file)
+              const binary = adds === "-" && dels === "-"
+              const additions = binary ? 0 : parseInt(adds)
+              const deletions = binary ? 0 : parseInt(dels)
+              return [
+                {
+                  file: name,
+                  status: status.get(name) ?? "modified",
+                  binary,
+                  additions: Number.isFinite(additions) ? additions : 0,
+                  deletions: Number.isFinite(deletions) ? deletions : 0,
+                } satisfies Row,
+              ]
+            })
+
+          // Hide ignored-file removals from the user-facing diff output.
+          const ignored = yield* ignore(rows.map((r) => r.file))
+          if (ignored.size === 0) return rows
+          return rows.filter((r) => !ignored.has(r.file))
+        })
+
+        const diffFull = Effect.fnUntraced(function* (from: string, to: string, options?: { patch?: boolean }) {
           return yield* locked(
             Effect.gen(function* () {
-              type Row = {
-                file: string
-                status: "added" | "deleted" | "modified"
-                binary: boolean
-                additions: number
-                deletions: number
-              }
-
-              type Ref = {
-                file: string
-                side: "before" | "after"
-                ref: string
-              }
-
               const show = Effect.fnUntraced(function* (row: Row) {
                 if (row.binary) return ["", ""]
                 if (row.status === "added") {
@@ -648,61 +832,21 @@ export const layer: Layer.Layer<
                 ),
               )
 
+              const rows = yield* rowsOf(from, to)
               const result: FileDiff[] = []
-              const status = new Map<string, "added" | "deleted" | "modified">()
 
-              const statuses = yield* git(
-                [...quote, ...args(["diff", "--no-ext-diff", "--name-status", "--no-renames", from, to, "--", "."])],
-                { cwd: state.directory },
-              )
-
-              for (const line of statuses.text.trim().split("\n")) {
-                if (!line) continue
-                const [code, file] = line.split("\t")
-                if (!code || !file) continue
-                status.set(file, code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified")
-              }
-
-              const numstat = yield* git(
-                [...quote, ...args(["diff", "--no-ext-diff", "--no-renames", "--numstat", from, to, "--", "."])],
-                {
-                  cwd: state.directory,
-                },
-              )
-
-              const rows = numstat.text
-                .trim()
-                .split("\n")
-                .filter(Boolean)
-                .flatMap((line) => {
-                  const [adds, dels, file] = line.split("\t")
-                  if (!file) return []
-                  const binary = adds === "-" && dels === "-"
-                  const additions = binary ? 0 : parseInt(adds)
-                  const deletions = binary ? 0 : parseInt(dels)
-                  return [
-                    {
-                      file,
-                      status: status.get(file) ?? "modified",
-                      binary,
-                      additions: Number.isFinite(additions) ? additions : 0,
-                      deletions: Number.isFinite(deletions) ? deletions : 0,
-                    } satisfies Row,
-                  ]
-                })
-
-              // Hide ignored-file removals from the user-facing diff output.
-              const ignored = yield* ignore(rows.map((r) => r.file))
-              if (ignored.size > 0) {
-                const filtered = rows.filter((r) => !ignored.has(r.file))
-                rows.length = 0
-                rows.push(...filtered)
-              }
+              // Statistics are already complete at this point (name-status +
+              // numstat, ~tens of ms). Full-text loading and per-line patching
+              // are skipped entirely — the patch text only serves low-frequency
+              // consumers (share/export/API), while the hot per-turn path reads
+              // statistics alone.
+              if (options?.patch === false) return rows.map(diffStats)
 
               const step = 100
               const patch = (file: string, before: string, after: string) =>
                 formatPatch(structuredPatch(file, file, before, after, "", "", { context: Number.MAX_SAFE_INTEGER }))
 
+              let pending = 0
               for (let i = 0; i < rows.length; i += step) {
                 const run = rows.slice(i, i + step)
                 const text = yield* load(run)
@@ -710,17 +854,64 @@ export const layer: Layer.Layer<
                 for (const row of run) {
                   const hit = text?.get(row.file) ?? { before: "", after: "" }
                   const [before, after] = row.binary ? ["", ""] : text ? [hit.before, hit.after] : yield* show(row)
+                  const started = performance.now()
+                  const patched = row.binary ? "" : patch(row.file, before, after)
+                  pending += performance.now() - started
                   result.push({
                     file: row.file,
-                    patch: row.binary ? "" : patch(row.file, before, after),
+                    patch: patched,
                     additions: row.additions,
                     deletions: row.deletions,
                     status: row.status,
                   })
+                  // Keep the event loop breathing between files so streams,
+                  // UI, and timers keep flowing; a single pathological patch
+                  // still dominates its own turn.
+                  if (pending >= 16) {
+                    pending = 0
+                    yield* Effect.yieldNow
+                  }
                 }
               }
 
               return result
+            }),
+          )
+        })
+
+        // Patch generation on demand (share/export/API surfaces): one git diff
+        // run produces every unified patch in the C engine, so pathological
+        // files stay cheap and the burn happens outside the JS event loop.
+        // Hunk bodies are byte-identical to the jsdiff output this replaces.
+        const diffFullPatched = Effect.fnUntraced(function* (from: string, to: string) {
+          return yield* locked(
+            Effect.gen(function* () {
+              const rows = yield* rowsOf(from, to)
+              if (rows.length === 0) return []
+
+              const result = yield* git(
+                [
+                  ...quote,
+                  ...args(["diff", "--no-ext-diff", "--no-renames", "--no-textconv", "-U999999", from, to, "--", "."]),
+                ],
+                { cwd: state.directory },
+              )
+              if (result.code !== 0) {
+                log.warn("failed to generate snapshot patches, returning statistics only", {
+                  exitCode: result.code,
+                  stderr: result.stderr,
+                })
+                return rows.map(diffStats)
+              }
+
+              const patches = parseGitPatch(result.text)
+              return rows.map((row) => ({
+                file: row.file,
+                patch: row.binary ? "" : (patches.get(row.file) ?? ""),
+                additions: row.additions,
+                deletions: row.deletions,
+                status: row.status,
+              }))
             }),
           )
         })
@@ -735,7 +926,7 @@ export const layer: Layer.Layer<
           Effect.forkScoped,
         )
 
-        return { cleanup, track, patch, restore, revert, diff, diffFull }
+        return { cleanup, track, patch, restore, revert, diff, diffFull, diffFullPatched }
       }),
     )
 
@@ -761,8 +952,11 @@ export const layer: Layer.Layer<
       diff: Effect.fn("Snapshot.diff")(function* (hash: string) {
         return yield* InstanceState.useEffect(state, (s) => s.diff(hash))
       }),
-      diffFull: Effect.fn("Snapshot.diffFull")(function* (from: string, to: string) {
-        return yield* InstanceState.useEffect(state, (s) => s.diffFull(from, to))
+      diffFull: Effect.fn("Snapshot.diffFull")(function* (from: string, to: string, options?: { patch?: boolean }) {
+        return yield* InstanceState.useEffect(state, (s) => s.diffFull(from, to, options))
+      }),
+      diffFullPatched: Effect.fn("Snapshot.diffFullPatched")(function* (from: string, to: string) {
+        return yield* InstanceState.useEffect(state, (s) => s.diffFullPatched(from, to))
       }),
     })
   }),

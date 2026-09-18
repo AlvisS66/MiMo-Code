@@ -16,12 +16,14 @@ void Log.init({ print: false })
 
 const ref = { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") }
 
-// Snapshot stub records every (from, to) pair diffFull is called with.
-// summarize feeds it the from/to anchors derived from step-start /
-// step-finish parts in `all`. If summarize ever pulls a non-main slice,
-// the captured anchors include subagent snapshot ids — which is exactly
-// the regression we want to catch.
-const captured: Array<{ from: string; to: string }> = []
+// Snapshot stub records every diffFull call: the (from, to) anchors plus
+// the options. summarize feeds it the from/to anchors derived from
+// step-start / step-finish parts in `all`. If summarize ever pulls a
+// non-main slice, the captured anchors include subagent snapshot ids —
+// which is exactly the regression we want to catch. The options capture
+// pins the patch-decoupling contract: the hot path must ask for
+// statistics only.
+const captured: Array<{ from: string; to: string; options?: { patch?: boolean } }> = []
 
 const snapshotStub = Layer.succeed(
   Snapshot.Service,
@@ -33,11 +35,12 @@ const snapshotStub = Layer.succeed(
     restore: () => Effect.void,
     revert: () => Effect.void,
     diff: () => Effect.succeed(""),
-    diffFull: (from, to) =>
+    diffFull: (from, to, options) =>
       Effect.sync(() => {
-        captured.push({ from, to })
+        captured.push({ from, to, options })
         return []
       }),
+    diffFullPatched: () => Effect.succeed([]),
   }),
 )
 
@@ -161,6 +164,8 @@ describe("SessionSummary.summarize main-slice contract", () => {
           expect(call.from).toBe("snap-main-from")
           expect(call.to).toBe("snap-main-to")
           expect(call.to).not.toBe("snap-sub-to")
+          // The hot path must request statistics only — no patch generation.
+          expect(call.options?.patch).toBe(false)
         }
         // At least one diffFull call should have happened (session-level diff).
         expect(captured.length).toBeGreaterThan(0)

@@ -293,13 +293,16 @@ it.live("tool execution produces non-empty session diff (snapshot race)", () =>
       expect(tool?.state.status).toBe("completed")
 
       // Poll for diff — summarize() is fire-and-forget
-      let diff: Array<{ file: string }> = []
+      let diff: Array<{ file: string; patch: string }> = []
       for (let i = 0; i < 50; i++) {
         diff = yield* summary.diff({ sessionID: session.id })
         if (diff.length > 0) break
         yield* Effect.sleep("100 millis")
       }
       expect(diff.length).toBeGreaterThan(0)
+      // The hot-path cache holds statistics only; diff() must regenerate
+      // patch content on demand, so served entries carry real patches.
+      expect(diff.some((item) => item.patch.length > 0)).toBe(true)
     }),
     { git: true, config: providerCfg },
   ),

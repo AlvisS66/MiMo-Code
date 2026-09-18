@@ -2,6 +2,7 @@ import { afterEach, test, expect } from "bun:test"
 import { $ } from "bun"
 import fs from "fs/promises"
 import path from "path"
+import { formatPatch, structuredPatch } from "diff"
 import { Effect } from "effect"
 import { Snapshot } from "../../src/snapshot"
 import { Instance } from "../../src/project/instance"
@@ -1389,6 +1390,154 @@ test("diffFull with binary file changes", async () => {
       const binaryDiff = diffs[0]
       expect(binaryDiff.file).toBe("binary.bin")
       expect(binaryDiff.patch).toBe("")
+    },
+  })
+})
+
+test("diffFull with patch disabled returns statistics only", async () => {
+  await using tmp = await bootstrap()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const before = await run(tmp.path, (snapshot) => snapshot.track())
+      expect(before).toBeTruthy()
+
+      await Filesystem.write(`${tmp.path}/a.txt`, `${tmp.extra.aContent} modified`)
+      await Filesystem.write(`${tmp.path}/new.txt`, "added content")
+      await $`rm ${tmp.path}/b.txt`.quiet()
+
+      const after = await run(tmp.path, (snapshot) => snapshot.track())
+      expect(after).toBeTruthy()
+
+      const diffs = await run(tmp.path, (snapshot) => snapshot.diffFull(before!, after!, { patch: false }))
+      expect(diffs.length).toBe(3)
+
+      const modified = diffs.find((d) => d.file === "a.txt")
+      expect(modified).toBeDefined()
+      expect(modified!.status).toBe("modified")
+      expect(modified!.additions).toBeGreaterThan(0)
+      expect(modified!.deletions).toBeGreaterThan(0)
+      expect(modified!.patch).toBe("")
+
+      const added = diffs.find((d) => d.file === "new.txt")
+      expect(added).toBeDefined()
+      expect(added!.status).toBe("added")
+      expect(added!.additions).toBeGreaterThan(0)
+      expect(added!.patch).toBe("")
+
+      const deleted = diffs.find((d) => d.file === "b.txt")
+      expect(deleted).toBeDefined()
+      expect(deleted!.status).toBe("deleted")
+      expect(deleted!.deletions).toBeGreaterThan(0)
+      expect(deleted!.patch).toBe("")
+    },
+  })
+})
+
+test("diffFull with patch disabled returns statistics with empty patches", async () => {
+  await using tmp = await bootstrap()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const before = await run(tmp.path, (snapshot) => snapshot.track())
+      expect(before).toBeTruthy()
+
+      await Filesystem.write(`${tmp.path}/a.txt`, `${tmp.extra.aContent} modified`)
+
+      const after = await run(tmp.path, (snapshot) => snapshot.track())
+      expect(after).toBeTruthy()
+
+      const withPatch = await run(tmp.path, (snapshot) => snapshot.diffFull(before!, after!))
+      expect(withPatch.length).toBe(1)
+      expect(withPatch[0].patch).toContain(`-${tmp.extra.aContent}`)
+
+      // Default (patch enabled) is unchanged; explicit false strips content only.
+      const withoutPatch = await run(tmp.path, (snapshot) => snapshot.diffFull(before!, after!, { patch: false }))
+      expect(withoutPatch.length).toBe(1)
+      expect(withoutPatch[0].additions).toBe(withPatch[0].additions)
+      expect(withoutPatch[0].deletions).toBe(withPatch[0].deletions)
+      expect(withoutPatch[0].status).toBe(withPatch[0].status)
+      expect(withoutPatch[0].patch).toBe("")
+    },
+  })
+})
+
+test("diffFullPatched matches jsdiff formatPatch byte-for-byte", async () => {
+  await using tmp = await bootstrap()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const contents = new Map<string, [string, string]>()
+
+      // Modified, after-state drops the trailing newline (no-eol markers).
+      const plainBefore = "line1\nline2\nline3\nline4\nline5\n"
+      const plainAfter = "line1\nline2-modified\nline3\ninserted\nline4\nline5"
+      contents.set("plain.txt", [plainBefore, plainAfter])
+      await Filesystem.write(`${tmp.path}/plain.txt`, plainBefore)
+
+      // CRLF content survives as-is in hunk bodies.
+      const crlfBefore = "a\r\nb\r\nc\r\n"
+      const crlfAfter = "a\r\nB\r\nc\r\n"
+      contents.set("crlf.txt", [crlfBefore, crlfAfter])
+      await Filesystem.write(`${tmp.path}/crlf.txt`, crlfBefore)
+
+      // Non-ASCII path with core.quotepath=false.
+      const uniBefore = "内容一\n内容二\n"
+      const uniAfter = "内容一\n内容二改\n"
+      contents.set("中文文件.txt", [uniBefore, uniAfter])
+      await Filesystem.write(`${tmp.path}/中文文件.txt`, uniBefore)
+
+      // NOTE: paths that git C-quotes even with core.quotepath=false (names
+      // containing quotes, backslashes, tabs, or other control characters)
+      // are unrepresentable on Windows — file creation fails at the Win32
+      // layer. unquoteGitPath covers them for Linux/macOS; add a fixture here
+      // when CI runs those platforms.
+
+      // Content that mimics diff metadata lines.
+      const trickyBefore = "--- not a header\n+++ also not\n@@ -1,1 +1,1 @@\nreal content\n"
+      const trickyAfter = "--- not a header\n+++ also not\n@@ -1,1 +1,1 @@\nchanged content\n"
+      contents.set("tricky.txt", [trickyBefore, trickyAfter])
+      await Filesystem.write(`${tmp.path}/tricky.txt`, trickyBefore)
+
+      const before = await run(tmp.path, (snapshot) => snapshot.track())
+      expect(before).toBeTruthy()
+
+      await Filesystem.write(`${tmp.path}/plain.txt`, plainAfter)
+      await Filesystem.write(`${tmp.path}/crlf.txt`, crlfAfter)
+      await Filesystem.write(`${tmp.path}/中文文件.txt`, uniAfter)
+      await Filesystem.write(`${tmp.path}/tricky.txt`, trickyAfter)
+
+      // Added file.
+      contents.set("new.txt", ["", "hello\nworld\n"])
+      await Filesystem.write(`${tmp.path}/new.txt`, "hello\nworld\n")
+
+      // Deleted file (bootstrap content has no trailing newline).
+      contents.set("a.txt", [`${tmp.extra.aContent}`, ""])
+      await $`rm ${tmp.path}/a.txt`.quiet()
+
+      // Binary stays statistics-only.
+      await Filesystem.write(`${tmp.path}/binary.bin`, new Uint8Array([0x00, 0x01, 0x02, 0x03]))
+
+      const after = await run(tmp.path, (snapshot) => snapshot.track())
+      expect(after).toBeTruthy()
+
+      const diffs = await run(tmp.path, (snapshot) => snapshot.diffFullPatched(before!, after!))
+      expect(diffs.map((d) => d.file).sort()).toEqual(
+        [...contents.keys(), "binary.bin"].sort(),
+      )
+
+      for (const d of diffs) {
+        if (d.file === "binary.bin") {
+          expect(d.patch).toBe("")
+          continue
+        }
+        const pair = contents.get(d.file)
+        expect(pair).toBeDefined()
+        const expected = formatPatch(
+          structuredPatch(d.file, d.file, pair![0], pair![1], "", "", { context: Number.MAX_SAFE_INTEGER }),
+        )
+        expect(d.patch).toBe(expected)
+      }
     },
   })
 })

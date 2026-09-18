@@ -79,10 +79,11 @@ export const layer = Layer.effect(
     const storage = yield* Storage.Service
     const bus = yield* Bus.Service
 
-    const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: MessageV2.WithParts[] }) {
+    // First step-start and last step-finish snapshot anchors across a slice.
+    const anchorsOf = (messages: MessageV2.WithParts[]) => {
       let from: string | undefined
       let to: string | undefined
-      for (const item of input.messages) {
+      for (const item of messages) {
         if (!from) {
           for (const part of item.parts) {
             if (part.type === "step-start" && part.snapshot) {
@@ -95,7 +96,12 @@ export const layer = Layer.effect(
           if (part.type === "step-finish" && part.snapshot) to = part.snapshot
         }
       }
-      if (from && to) return yield* snapshot.diffFull(from, to)
+      return { from, to }
+    }
+
+    const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: MessageV2.WithParts[] }) {
+      const { from, to } = anchorsOf(input.messages)
+      if (from && to) return yield* snapshot.diffFull(from, to, { patch: false })
       return []
     })
 
@@ -133,15 +139,23 @@ export const layer = Layer.effect(
         const all = yield* sessions.messages({ sessionID: input.sessionID, agentID: "*" })
         const target = all.find((item) => item.info.id === input.messageID)
         if (!target || target.info.role !== "user") return []
-        const diffs =
-          target.info.summary?.diffs ??
-          (yield* computeDiff({
-            messages: all.filter(
-              (item) =>
-                item.info.id === input.messageID ||
-                (item.info.role === "assistant" && item.info.parentID === input.messageID),
-            ),
-          }))
+        const range = all.filter(
+          (item) =>
+            item.info.id === input.messageID ||
+            (item.info.role === "assistant" && item.info.parentID === input.messageID),
+        )
+        const { from, to } = anchorsOf(range)
+        const cached = target.info.summary?.diffs
+        // Hot-path caches hold statistics only; enrich on demand just like
+        // the session-level read — this path runs far off the hot loop, so
+        // the extra git diff is fine.
+        const patched =
+          from && to && (!cached || cached.every((item) => item.patch === ""))
+            ? yield* snapshot
+                .diffFullPatched(from, to)
+                .pipe(Effect.catch(() => Effect.succeed([] as Snapshot.FileDiff[])))
+            : []
+        const diffs = patched.length > 0 ? patched : (cached ?? [])
         return diffs.map((item) => ({ ...item, file: unquoteGitPath(item.file) }))
       }
       const diffs = yield* storage
@@ -154,6 +168,20 @@ export const layer = Layer.effect(
       })
       const changed = next.some((item, i) => item.file !== diffs[i]?.file)
       if (changed) yield* storage.write(["session_diff", input.sessionID], next).pipe(Effect.ignore)
+
+      // Hot-path caches hold statistics only (patch: ""). When every entry is
+      // content-less, regenerate with patches for the callers that need them —
+      // without writing back, so storage stays lightweight.
+      if (next.length > 0 && next.every((item) => item.patch === "")) {
+        const all = yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" })
+        const { from, to } = anchorsOf(all)
+        if (from && to) {
+          const patched = yield* snapshot
+            .diffFullPatched(from, to)
+            .pipe(Effect.catch(() => Effect.succeed([] as Snapshot.FileDiff[])))
+          if (patched.length > 0) return patched.map((item) => ({ ...item, file: unquoteGitPath(item.file) }))
+        }
+      }
       return next
     })
 
