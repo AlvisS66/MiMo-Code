@@ -157,6 +157,7 @@ import { ActorRegistry } from "@/actor/registry"
 import { Metrics } from "@/metrics"
 import { resolveInvocationStyle, type ToolStyleConfig } from "../tool/invocation-style"
 import { ToolResultError } from "../tool/result-error"
+import { errorMessage } from "../util/error"
 import { RecoverableError } from "../tool/recoverable"
 import { shouldAutoDream, shouldAutoDistill, DREAM_TASK, DISTILL_TASK, AUTO_DREAM_TITLE, AUTO_DISTILL_TITLE } from "./auto-dream"
 import {
@@ -2080,9 +2081,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 return cancelResult
               }
               yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-              const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.promise(() =>
-                execute(mcpBeforeOutput.args, opts),
-              )
+              const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.tryPromise({
+                try: () => execute(mcpBeforeOutput.args, opts),
+                catch: (error) => error,
+              }).pipe(Effect.catch((error) => Effect.gen(function* () {
+                // Catch SDK execution failures here, before direct/exec paths persist
+                // or forward them. Successful results (including diffs) never enter.
+                if (opts.abortSignal?.aborted) return yield* Effect.fail(error)
+                const truncated = yield* truncate.output(errorMessage(error), { outcome: "error" }, input.agent)
+                if (!truncated.truncated) return yield* Effect.fail(error)
+                return yield* Effect.fail(new ToolResultError(truncated.content, {
+                  truncated: true,
+                  outputPath: truncated.outputPath,
+                }))
+              })))
               yield* plugin.trigger(
                 "tool.execute.after",
                 { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
