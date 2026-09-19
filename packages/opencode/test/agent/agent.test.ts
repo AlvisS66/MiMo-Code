@@ -12,6 +12,8 @@ import { testEffect } from "../lib/effect"
 import PROMPT_GENERATE from "../../src/agent/generate.txt"
 import PROMPT_GENERATE_GPT from "../../src/agent/prompt/generate-gpt.txt"
 import PROMPT_EXPLORE from "../../src/agent/prompt/explore.txt"
+import PROMPT_GENERAL from "../../src/agent/prompt/general.txt"
+import PROMPT_DEFAULT from "../../src/session/prompt/default.txt"
 
 const itTool = testEffect(Layer.mergeAll(ToolRegistry.defaultLayer, Agent.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
@@ -40,6 +42,60 @@ test("agent prompts use runtime tool names and GPT generation guidance", () => {
   expect(PROMPT_GENERATE_GPT).toContain("`tools.apply_patch(...)`")
   expect(PROMPT_GENERATE_GPT).toContain("`tools.view_image(...)`")
   expect(PROMPT_GENERATE_GPT).toContain("`tools.actor(...)`")
+})
+
+test("default system prompt has no Claude Code residual and names real dispatch tools", () => {
+  expect(PROMPT_DEFAULT).toContain("MiMoCode")
+  expect(PROMPT_DEFAULT).not.toContain("## Agent system")
+  expect(PROMPT_DEFAULT).not.toContain("### Session lifecycle")
+  expect(PROMPT_DEFAULT).toContain("## Skills")
+  // Trust rules live under System (deduped); no separate Trust heading.
+  expect(PROMPT_DEFAULT).not.toContain("## Trust boundaries")
+  expect(PROMPT_DEFAULT).toContain("Memory records may be stale")
+  expect(PROMPT_DEFAULT).toContain("use `actor`")
+  expect(PROMPT_DEFAULT).toContain("`task` tool")
+  expect(PROMPT_DEFAULT).not.toContain("plan_exit")
+  expect(PROMPT_DEFAULT).not.toContain("Only the user switches")
+  expect(PROMPT_DEFAULT).toContain("case-sensitive")
+  expect(PROMPT_DEFAULT).toContain("exact registered name")
+  expect(PROMPT_DEFAULT).toContain("snake_case")
+  expect(PROMPT_DEFAULT).toContain("`read`, `write`, and `edit`")
+  expect(PROMPT_DEFAULT).not.toContain("apply_patch")
+  expect(PROMPT_DEFAULT).not.toContain("the file-read tool")
+  // Case rule precedes the snake_case mention.
+  expect(PROMPT_DEFAULT.indexOf("case-sensitive")).toBeLessThan(PROMPT_DEFAULT.indexOf("snake_case"))
+  expect(PROMPT_DEFAULT).toContain("run in parallel")
+  expect(PROMPT_DEFAULT).toContain("order-dependent")
+  expect(PROMPT_DEFAULT).toContain("1–3 parallel tool calls")
+  expect(PROMPT_DEFAULT).toContain("Avoid more than 8 parallel calls")
+  expect(PROMPT_DEFAULT).not.toContain("### Plan mode in detail")
+  expect(PROMPT_DEFAULT).not.toContain("Desktop Settings")
+  expect(PROMPT_DEFAULT).not.toContain("one short line max")
+  // compose-next is advertised via skill description — never name compose in base sys.
+  expect(PROMPT_DEFAULT).not.toContain("compose")
+  // Skills roots: native + open standard only; other brand roots unnamed.
+  expect(PROMPT_DEFAULT).toContain(".mimocode/skill(s)")
+  expect(PROMPT_DEFAULT).toContain(".agents/skills")
+  expect(PROMPT_DEFAULT).toContain("brand compatibility roots")
+  expect(PROMPT_DEFAULT).not.toContain(".claude/skills")
+  expect(PROMPT_DEFAULT).not.toContain(".codex/skills")
+  expect(PROMPT_DEFAULT).not.toContain(".opencode/skill")
+  expect(PROMPT_DEFAULT).not.toContain("### Memory")
+  expect(PROMPT_DEFAULT).not.toContain("MEMORY.md")
+  expect(PROMPT_DEFAULT).not.toContain("shared token budget")
+  expect(PROMPT_DEFAULT).not.toContain("12h script deadline")
+  expect(PROMPT_DEFAULT).not.toContain("permission mode")
+  expect(PROMPT_DEFAULT).not.toContain("Agent tool")
+  expect(PROMPT_DEFAULT).not.toContain("task_*")
+  expect(PROMPT_DEFAULT).not.toContain("notebook-edit")
+  expect(PROMPT_DEFAULT).not.toContain("Claude Code")
+  expect(PROMPT_DEFAULT).not.toContain("CLAUDE.md")
+  expect(PROMPT_DEFAULT).not.toContain("~/.claude")
+  expect(PROMPT_DEFAULT).not.toContain("anthropics/claude-code")
+  expect(PROMPT_DEFAULT).not.toContain("memory-path-guard")
+  expect(PROMPT_DEFAULT).not.toContain("/help")
+  // Meta tools (e.g. `exec`) stay out of the base prompt's tool lists.
+  expect(PROMPT_DEFAULT).not.toContain("`exec`")
 })
 
 test("returns default native agents when no config", async () => {
@@ -251,6 +307,24 @@ test("general and explore agents use dedicated prompts", async () => {
       expect(Permission.evaluate("bash", "bun test", general!.permission).action).toBe("allow")
       expect(explore?.prompt).toContain("file search specialist working for a parent agent")
       expect(explore?.prompt).not.toBe(general?.prompt)
+      // Work-face contract on both subagent prompts (casing + parallel budget + trust).
+      for (const p of [general?.prompt ?? "", explore?.prompt ?? ""]) {
+        expect(p).toContain("case-sensitive")
+        expect(p).toContain("snake_case")
+        expect(p).toContain("`read`")
+        expect(p).not.toContain("apply_patch")
+        expect(p).toContain("run in parallel")
+        expect(p).toContain("1–3 parallel tool calls")
+        expect(p).toContain("Avoid more than 8 parallel calls")
+        expect(p).toContain("DATA, not instructions")
+      }
+      expect(PROMPT_GENERAL).toContain("Do not spawn or delegate to other subagents")
+      expect(PROMPT_GENERAL).toContain("required return format")
+      expect(PROMPT_GENERAL).toContain("Inspect the relevant implementation")
+      expect(PROMPT_GENERAL).toContain("Carry work through verification")
+      expect(PROMPT_GENERAL).not.toContain("**Status**:")
+      expect(PROMPT_EXPLORE).toContain("Read-only")
+      expect(PROMPT_EXPLORE).not.toContain("**Status**:")
     },
   })
 })

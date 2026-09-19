@@ -209,7 +209,7 @@ export function buildRecallReminderText(input: { sessMemDir: string; hints: stri
     `${RECALL_REMINDER_MARKER} ${input.sessMemDir}/. Recall content`,
     "not in your context with:",
     input.hints[0],
-    `- Read(file_path="${input.sessMemDir}/...")`,
+    `- read(file_path="${input.sessMemDir}/...")`,
     ...input.hints.slice(1),
     "",
     "Don't ask the user about something memory may already record.",
@@ -2805,7 +2805,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: `Called the Read tool with the following input: ${JSON.stringify({ file_path: part.filename })}`,
+                    text: `Called the \`read\` tool with the following input: ${JSON.stringify({ file_path: part.filename })}`,
                   },
                   {
                     messageID: info.id,
@@ -2925,7 +2925,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: `Called the Read tool with the following input: ${JSON.stringify(args)}`,
+                    text: `Called the \`read\` tool with the following input: ${JSON.stringify(args)}`,
                   },
                 ]
                 const exit = yield* provider.getModel(info.model.providerID, info.model.modelID).pipe(
@@ -2967,7 +2967,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: `Read tool failed to read ${filepath} with the following error: ${message}`,
+                    text: `\`read\` tool failed to read ${filepath} with the following error: ${message}`,
                   })
                 }
                 return pieces
@@ -2990,7 +2990,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       sessionID: input.sessionID,
                       type: "text",
                       synthetic: true,
-                      text: `Read tool failed to read ${filepath} with the following error: ${message}`,
+                      text: `\`read\` tool failed to read ${filepath} with the following error: ${message}`,
                     },
                   ]
                 }
@@ -3000,7 +3000,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: `Called the Read tool with the following input: ${JSON.stringify(args)}`,
+                    text: `Called the \`read\` tool with the following input: ${JSON.stringify(args)}`,
                   },
                   {
                     messageID: info.id,
@@ -3023,7 +3023,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: `Called the Read tool with the following input: {"file_path":"${filepath}"}`,
+                    text: `Called the \`read\` tool with the following input: {"file_path":"${filepath}"}`,
                   }
               // Size gate on stat, before the file is read (see classifyAttachment):
               // an under-limit file is inlined as-is, an oversized image within

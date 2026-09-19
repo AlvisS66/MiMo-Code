@@ -42,7 +42,7 @@ export const MemoryTool = Tool.define(
                 `   ranked, so 1-2 rare words (an exact ID, function name, flag) beat a long`,
                 `   descriptive phrase. Drop generic words ("config", "params", "database").`,
                 `2. For a LITERAL string the tokenizer splits (URLs like postgres://…, ports`,
-                `   like 5433, paths) — Grep the memory dir directly; FTS can't see it.`,
+                `   like 5433, paths) — \`grep\` the memory dir directly; FTS can't see it.`,
                 `3. For VERBATIM recall of something a summary may have glossed over (exact`,
                 `   command, the user's precise wording) — use the history tool: search/around`,
                 `   give summaries, then get(part_id) reads the original text.`,
@@ -54,7 +54,7 @@ export const MemoryTool = Tool.define(
           const lines = [
             `Found ${results.length} match${results.length === 1 ? "" : "es"} (BM25-ranked, best first).`,
             `A hit here is authoritative — use it even if a parallel/sibling query returned nothing.`,
-            `If you need the FULL body (snippets are truncated), Read the path.`,
+            `If you need the FULL body (snippets are truncated), \`read\` the path.`,
             `If you need an EXACT literal (a connection string, port, token, full command line, path) and the snippet/body only paraphrases or partially shows it, the curated memory may have dropped the precise form — search the history tool, then get(part_id) for the original text.`,
             ``,
           ]
