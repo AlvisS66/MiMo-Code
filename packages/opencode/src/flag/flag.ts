@@ -37,7 +37,7 @@ function ratio(key: string) {
 const MIMOCODE_EXPERIMENTAL = truthy("MIMOCODE_EXPERIMENTAL")
 
 // Defaults to false. When enabled, mimocode runs in pure-mimo mode:
-//   — does NOT inherit Claude Code's settings (CLAUDE.md, ~/.claude/skills, etc.)
+//   — does NOT inherit Claude Code prompt files (CLAUDE.md, ~/.claude/CLAUDE.md)
 //   — does NOT pick up provider API keys from environment variables
 //   — falls back to the mimo-auto model as the default
 // Set MIMOCODE_MIMO_ONLY=true to disable .claude inheritance and env-based
@@ -46,9 +46,9 @@ const MIMOCODE_MIMO_ONLY = truthy("MIMOCODE_MIMO_ONLY")
 const MIMOCODE_DISABLE_CLAUDE_CODE_ENV = truthy("MIMOCODE_DISABLE_CLAUDE_CODE")
 const MIMOCODE_DISABLE_CLAUDE_CODE = MIMOCODE_MIMO_ONLY || MIMOCODE_DISABLE_CLAUDE_CODE_ENV
 
-const MIMOCODE_DISABLE_EXTERNAL_SKILLS = truthy("MIMOCODE_DISABLE_EXTERNAL_SKILLS")
-const MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS =
-  MIMOCODE_DISABLE_EXTERNAL_SKILLS || MIMOCODE_DISABLE_CLAUDE_CODE || truthy("MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS")
+// External skill roots:
+//   .agents                       default on  — MIMOCODE_DISABLE_AGENTS_SKILLS
+//   .claude / .codex / .opencode  default off — MIMOCODE_ENABLE_*_SKILLS
 const copy = process.env["MIMOCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
 
 /**
@@ -228,7 +228,7 @@ export const Flag = {
   MIMOCODE_DISABLE_CLAUDE_CODE,
   get MIMOCODE_DISABLE_CLAUDE_CODE_MCP() {
     // MCP compatibility stays on in mimo-only mode so users can reuse Claude Code
-    // MCP servers without inheriting prompts, skills, or provider env keys.
+    // MCP servers without inheriting prompts or provider env keys.
     return MIMOCODE_DISABLE_CLAUDE_CODE_ENV || truthy("MIMOCODE_DISABLE_CLAUDE_CODE_MCP")
   },
   MIMOCODE_DISABLE_CLAUDE_CODE_PROMPT: MIMOCODE_DISABLE_CLAUDE_CODE || truthy("MIMOCODE_DISABLE_CLAUDE_CODE_PROMPT"),
@@ -236,11 +236,19 @@ export const Flag = {
   // {project}/.claude/commands load as slash commands. Independent of the
   // mimo-only master switch. Set MIMOCODE_DISABLE_CLAUDE_CODE_COMMANDS=true to disable.
   MIMOCODE_DISABLE_CLAUDE_CODE_COMMANDS: truthy("MIMOCODE_DISABLE_CLAUDE_CODE_COMMANDS"),
-  MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS,
-  MIMOCODE_DISABLE_EXTERNAL_SKILLS,
-  MIMOCODE_DISABLE_AGENTS_SKILLS: MIMOCODE_DISABLE_EXTERNAL_SKILLS || truthy("MIMOCODE_DISABLE_AGENTS_SKILLS"),
-  MIMOCODE_DISABLE_CODEX_SKILLS: MIMOCODE_DISABLE_EXTERNAL_SKILLS || truthy("MIMOCODE_DISABLE_CODEX_SKILLS"),
-  MIMOCODE_DISABLE_OPENCODE_SKILLS: MIMOCODE_DISABLE_EXTERNAL_SKILLS || truthy("MIMOCODE_DISABLE_OPENCODE_SKILLS"),
+  // External skill-root switches. Read lazily so tests can flip env.
+  get MIMOCODE_DISABLE_AGENTS_SKILLS() {
+    return truthy("MIMOCODE_DISABLE_AGENTS_SKILLS")
+  },
+  get MIMOCODE_ENABLE_CLAUDE_CODE_SKILLS() {
+    return truthy("MIMOCODE_ENABLE_CLAUDE_CODE_SKILLS")
+  },
+  get MIMOCODE_ENABLE_CODEX_SKILLS() {
+    return truthy("MIMOCODE_ENABLE_CODEX_SKILLS")
+  },
+  get MIMOCODE_ENABLE_OPENCODE_SKILLS() {
+    return truthy("MIMOCODE_ENABLE_OPENCODE_SKILLS")
+  },
 
   // Skill-search ranking and loading policy. Exact mentions stay above BM25;
   // the BM25/coverage blend has a 0.90 ceiling, and near-max results auto-load.
