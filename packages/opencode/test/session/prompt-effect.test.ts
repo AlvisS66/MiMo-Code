@@ -2700,6 +2700,63 @@ for (const isError of [false, true]) {
   )
 }
 
+// [TP-RUN-R12-36] Desktop turn-execution: exercise the engine execution boundary,
+// persistence and model continuation, not a renderer-injected error string.
+for (const mode of ["throw", "reject", "short"] as const) {
+  const text = mode === "short" ? "short MCP exception" : "MCP exception\n" + "诊断😀 line\n".repeat(30_000)
+  const exceptionIt = testEffect(makeHttp(mcpLayer(() => ({
+    diagnostic: dynamicTool({
+      description: "Diagnostic exception probe",
+      inputSchema: jsonSchema({ type: "object", properties: {} }),
+      execute: () => {
+        if (mode === "throw") throw new Error(text)
+        return Promise.reject(mode === "short" ? new Error(text) : text)
+      },
+    }),
+  }))))
+  for (const nested of [false, true]) {
+    exceptionIt.live(`MCP exception ${mode} ${nested ? "exec" : "direct"} is bounded [TP-RUN-R12-36]`, () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const session = yield* sessions.create({
+            title: "Exception boundary",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
+          yield* prompt.prompt({ sessionID: session.id, agent: "build", model: nested ? mcpRef : ref, noReply: true,
+            parts: [{ type: "text", text: "run diagnostic" }] })
+          yield* llm.tool(nested ? "exec" : "diagnostic", nested ? { code: "await tools.diagnostic({})" } : {})
+          yield* llm.text("exception handled")
+          yield* prompt.loop({ sessionID: session.id })
+          const parts = (yield* MessageV2.filterCompactedEffect(session.id)).flatMap(message => message.parts)
+          const tool = parts.find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === (nested ? "exec" : "diagnostic"))
+          expect(tool).toBeDefined()
+          if (!tool || tool.state.status === "pending") throw new Error("missing tool state")
+          const subparts = tool.state.metadata?.sub_parts as Array<{ tool: string; state: { status: string; error: string; metadata?: Record<string, unknown> } }> | undefined
+          const state = nested ? subparts?.find(part => part.tool === "diagnostic")?.state : tool.state
+          expect(state?.status).toBe("error")
+          if (!state || !("error" in state)) throw new Error("missing error state")
+          if (mode === "short") {
+            expect(state.error).toBe(text)
+          } else {
+            expect(Buffer.byteLength(state.error)).toBeLessThan(55 * 1024)
+            expect(state.metadata?.truncated).toBe(true)
+            expect(typeof state.metadata?.outputPath).toBe("string")
+            const saved = yield* Effect.promise(() => Bun.file(String(state.metadata?.outputPath)).text())
+            expect(saved === text).toBe(true)
+            expect(state.error).toContain("tool call failed")
+            const followup = JSON.stringify((yield* llm.inputs).at(-1))
+            expect(followup.includes(text)).toBe(false)
+            expect(Buffer.byteLength(followup)).toBeLessThan(256 * 1024)
+          }
+          expect(parts.some(part => part.type === "text" && part.text === "exception handled")).toBe(true)
+        }),
+        { git: true, config: providerCfg },
+      ), 30_000)
+  }
+}
+
 mcpIt.live("MCP isError becomes a tool error without losing standard result fields", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm }) {
