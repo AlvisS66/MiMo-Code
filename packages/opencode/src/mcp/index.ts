@@ -316,9 +316,37 @@ export const Status = z
   })
 export type Status = z.infer<typeof Status>
 
-// Store transports for OAuth servers to allow finishing auth
+// Store transports for OAuth servers to allow finishing auth.
+// Transport + host revision form one pending-attempt record (R007).
+type PendingOAuthAttempt = {
+  transport: TransportWithAuth
+  hostRevision?: string
+  fromHost: boolean
+}
+const pendingOAuthTransports = new Map<string, PendingOAuthAttempt>()
+
+/**
+ * Publish a pending OAuth attempt only when it still matches the live host
+ * generation. A current host attempt always replaces a stale one; a stale late
+ * Unauthorized never registers over (or into) a slot reserved for the live host.
+ */
+function publishPendingOAuthAttempt(
+  key: string,
+  attempt: PendingOAuthAttempt,
+): void {
+  const currentRev = HostMcp.revisionOf(key)
+  if (attempt.fromHost && attempt.hostRevision != null) {
+    if (attempt.hostRevision !== currentRev) return
+    pendingOAuthTransports.set(key, attempt)
+    return
+  }
+  const existing = pendingOAuthTransports.get(key)
+  const existingIsCurrentHost =
+    !!existing?.fromHost && existing.hostRevision != null && existing.hostRevision === currentRev
+  if (!existingIsCurrentHost) pendingOAuthTransports.set(key, attempt)
+}
+
 type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
-const pendingOAuthTransports = new Map<string, TransportWithAuth>()
 
 // Prompt cache types
 type PromptInfo = Awaited<ReturnType<MCPClient["listPrompts"]>>["prompts"][number]
@@ -420,6 +448,7 @@ type AuthResult =
       client: MCPClient
       /** Config snapshot that opened this connection; sampling must stay bound to it. */
       resolved: { mcp: ConfigMCP.Info; hostOwned: boolean }
+      hostRevision?: string
     }
   | { kind: "redirect"; authorizationUrl: string; oauthState: string }
 
@@ -497,7 +526,13 @@ export const layer = Layer.effect(
     const connectRemote = Effect.fn("MCP.connectRemote")(function* (
       key: string,
       mcp: ConfigMCP.Info & { type: "remote" },
+      identity?: { hostRevision?: string; fromHost: boolean },
     ) {
+      // Prefer the caller's creation snapshot; only fall back to current HostMcp
+      // when create() was invoked without one (e.g. refreshHost discovery).
+      const hostRevisionAtCreate =
+        identity?.hostRevision ?? (HostMcp.get()[key] ? HostMcp.revisionOf(key) : undefined)
+      const fromHostAtCreate = identity?.fromHost ?? hostRevisionAtCreate != null
       const oauthDisabled = mcp.oauth === false
       const oauthConfig = typeof mcp.oauth === "object" ? mcp.oauth : undefined
       let authProvider: McpOAuthProvider | undefined
@@ -566,7 +601,13 @@ export const layer = Layer.effect(
                   })
                   .pipe(Effect.ignore, Effect.as(undefined))
               } else {
-                pendingOAuthTransports.set(key, transport)
+                // Generation-aware publish (R007): current host attempts replace
+                // stale pending; stale late Unauthorized cannot register.
+                publishPendingOAuthAttempt(key, {
+                  transport,
+                  hostRevision: hostRevisionAtCreate,
+                  fromHost: fromHostAtCreate,
+                })
                 lastStatus = { status: "needs_auth" as const }
                 return bus
                   .publish(TuiEvent.ToastShow, {
@@ -669,7 +710,11 @@ export const layer = Layer.effect(
       )
     })
 
-    const create = Effect.fn("MCP.create")(function* (key: string, mcp: ConfigMCP.Info) {
+    const create = Effect.fn("MCP.create")(function* (
+      key: string,
+      mcp: ConfigMCP.Info,
+      identity?: { hostRevision?: string; fromHost: boolean },
+    ) {
       if (mcp.enabled === false) {
         log.info("mcp server disabled", { key })
         return DISABLED_RESULT
@@ -679,7 +724,7 @@ export const layer = Layer.effect(
 
       const { client: mcpClient, status } =
         mcp.type === "remote"
-          ? yield* connectRemote(key, mcp as ConfigMCP.Info & { type: "remote" })
+          ? yield* connectRemote(key, mcp as ConfigMCP.Info & { type: "remote" }, identity)
           : yield* connectLocal(key, mcp as ConfigMCP.Info & { type: "local" })
 
       if (!mcpClient) {
@@ -900,6 +945,13 @@ export const layer = Layer.effect(
       )
     })
 
+    function releaseMcpClient(client: MCPClient | undefined) {
+      if (!client) return Effect.void
+      return McpSampling.cancelAll(client).pipe(
+        Effect.andThen(Effect.tryPromise(() => client.close()).pipe(Effect.ignore)),
+      )
+    }
+
     const storeClient = Effect.fnUntraced(function* (
       s: State,
       name: string,
@@ -907,15 +959,43 @@ export const layer = Layer.effect(
       listed: MCPToolDef[],
       timeout?: number,
       sampling?: ConfigMCP.Info["sampling"],
+      opts?: { fromHost?: boolean; hostRevision?: string },
     ) {
+      const admit = () => {
+        const hostNow = HostMcp.get()[name]
+        if (opts?.fromHost) {
+          if (!hostNow || hostNow.enabled === false) return "reject-disabled" as const
+          if (opts.hostRevision != null && opts.hostRevision !== HostMcp.revisionOf(name)) {
+            return "reject-stale" as const
+          }
+          return "ok" as const
+        }
+        if (hostNow != null) return "reject-owned" as const
+        return "ok" as const
+      }
+      const discardAttempt = (fallback: Status) =>
+        releaseMcpClient(client).pipe(Effect.as(s.status[name] ?? fallback))
+
+      const first = admit()
+      if (first !== "ok") {
+        return yield* discardAttempt(first === "reject-stale" ? ({ status: "connected" } as Status) : ({ status: "disabled" } as Status))
+      }
+      const second = admit()
+      if (second !== "ok") {
+        return yield* discardAttempt(second === "reject-stale" ? ({ status: "connected" } as Status) : ({ status: "disabled" } as Status))
+      }
+      // Commit first, then release the previous client (R002). Closing previous
+      // before commit can leave a dead registry entry if admission is refused.
+      const previous = s.clients[name]
       const bridge = yield* EffectBridge.make()
-      yield* closeClient(s, name)
       s.status[name] = { status: "connected" }
       s.clients[name] = client
       s.defs[name] = listed
-      // A successful store supersedes any prior failed-refresh cooldown.
       delete s.hostRetryAt[name]
       watch(s, name, client, bridge, timeout, sampling)
+      if (previous && previous !== client) {
+        yield* releaseMcpClient(previous)
+      }
       return s.status[name]
     })
 
@@ -947,23 +1027,60 @@ export const layer = Layer.effect(
       name: string,
       mcp: ConfigMCP.Info,
       sampling?: ConfigMCP.Info["sampling"],
+      opts?: { fromHost?: boolean; hostRevision?: string },
     ) {
+      // Prefer revision captured at the config-resolution boundary (R006).
+      const hostRevision = opts?.hostRevision ?? (HostMcp.get()[name] ? HostMcp.revisionOf(name) : undefined)
       const s = yield* InstanceState.get(state)
-      const result = yield* create(name, mcp)
+      const result = yield* create(name, mcp, {
+        fromHost: opts?.fromHost === true,
+        hostRevision,
+      })
 
-      s.status[name] = result.status
       if (!result.mcpClient) {
-        yield* closeClient(s, name)
-        delete s.clients[name]
-        return result.status
+        // Failure completion uses the same validity rule as success: a host-sourced
+        // attempt that is no longer valid must not mutate the current connection.
+        const hostNow = HostMcp.get()[name]
+        if (opts?.fromHost) {
+          const stillValidHost = !!hostNow
+            && hostNow.enabled !== false
+            && (hostRevision == null || hostRevision === HostMcp.revisionOf(name))
+          if (!stillValidHost) {
+            return s.status[name] ?? { status: "disabled" as const }
+          }
+          s.status[name] = result.status
+          return result.status
+        }
+        if (hostNow == null) {
+          s.status[name] = result.status
+          // Close only the client we captured; do not delete a replacement by name.
+          const victim = s.clients[name]
+          yield* releaseMcpClient(victim)
+          if (victim && s.clients[name] === victim) {
+            delete s.clients[name]
+            delete s.defs[name]
+          }
+        }
+        return hostNow == null ? result.status : (s.status[name] ?? { status: "connected" as const })
       }
 
       // `sampling` must be computed with the same config snapshot as `mcp`.
-      return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout, sampling ?? mcp.sampling)
+      return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout, sampling ?? mcp.sampling, {
+        ...opts,
+        hostRevision,
+      })
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCP.Info) {
-      yield* createAndStore(name, mcp)
+      // HostMcp owns readiness and connection shape for host-projected names.
+      // User/SDK add must not replace or re-enable a host-owned entry.
+      if (HostMcp.get()[name] != null) {
+        log.error("MCP name is host-owned; add refused", { name })
+        const s = yield* InstanceState.get(state)
+        // Return the real current status — do not fabricate "disabled".
+        return { status: { ...s.status, [name]: s.status[name] ?? { status: "disabled" as const } } }
+      }
+      yield* createAndStore(name, mcp, undefined, { fromHost: false })
       const s = yield* InstanceState.get(state)
       return { status: s.status }
     })
@@ -974,10 +1091,18 @@ export const layer = Layer.effect(
         log.error("MCP config not found or invalid", { name })
         return
       }
+      // Explicit connect must not lift a host closed gate.
+      if (resolved.hostOwned && resolved.mcp.enabled === false) {
+        log.error("MCP is host-owned and disabled; connect refused", { name })
+        return
+      }
+      // Bind config + ownership + revision at the resolution boundary (R006).
+      const hostRevision = resolved.hostOwned ? HostMcp.revisionOf(name) : undefined
       yield* createAndStore(
         name,
         { ...resolved.mcp, enabled: true },
         hostEffectiveSampling(resolved.mcp, resolved.hostOwned),
+        { fromHost: resolved.hostOwned, hostRevision },
       )
     })
 
@@ -1122,6 +1247,12 @@ export const layer = Layer.effect(
       const resolved = yield* getMcpConfig(mcpName)
       const mcpConfig = resolved?.mcp
       if (!mcpConfig) throw new Error(`MCP server ${mcpName} not found or disabled`)
+      // Auth must not open or complete a connection that Host closed.
+      if (resolved.hostOwned && mcpConfig.enabled === false) {
+        throw new Error(`MCP server ${mcpName} is host-owned and disabled`)
+      }
+      // Capture attempt identity at the start of auth, not after connect completes (R003).
+      const hostRevisionAtStart = resolved.hostOwned ? HostMcp.revisionOf(mcpName) : undefined
       if (mcpConfig.type !== "remote") throw new Error(`MCP server ${mcpName} is not a remote server`)
       if (mcpConfig.oauth === false) throw new Error(`MCP server ${mcpName} has OAuth explicitly disabled`)
 
@@ -1165,6 +1296,7 @@ export const layer = Layer.effect(
                 oauthState,
                 client,
                 resolved,
+                hostRevision: hostRevisionAtStart,
               }) satisfies AuthResult,
           )
         },
@@ -1172,7 +1304,12 @@ export const layer = Layer.effect(
       }).pipe(
         Effect.catch((error) => {
           if (error instanceof UnauthorizedError && capturedUrl) {
-            pendingOAuthTransports.set(mcpName, transport)
+            // Same identity-bound publish as connectRemote (R007).
+            publishPendingOAuthAttempt(mcpName, {
+              transport,
+              hostRevision: hostRevisionAtStart,
+              fromHost: resolved.hostOwned,
+            })
             return Effect.succeed({
               kind: "redirect",
               authorizationUrl: capturedUrl.toString(),
@@ -1217,6 +1354,7 @@ export const layer = Layer.effect(
           listed,
           resolved.mcp.timeout,
           hostEffectiveSampling(resolved.mcp, resolved.hostOwned),
+          { fromHost: resolved.hostOwned, hostRevision: result.hostRevision },
         )
       }
 
@@ -1258,8 +1396,9 @@ export const layer = Layer.effect(
     })
 
     const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
-      const transport = pendingOAuthTransports.get(mcpName)
-      if (!transport) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
+      const attempt = pendingOAuthTransports.get(mcpName)
+      if (!attempt) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
+      const { transport, hostRevision, fromHost } = attempt
 
       const result = yield* Effect.tryPromise({
         try: () => transport.finishAuth(authorizationCode).then(() => true as const),
@@ -1273,13 +1412,22 @@ export const layer = Layer.effect(
         return { status: "failed", error: "OAuth completion failed" } as Status
       }
 
-      yield* auth.clearCodeVerifier(mcpName)
+      // Stale/attempt-replaced completion must not clear the new flow's verifier
+      // or publish a connection (R007).
+      if (pendingOAuthTransports.get(mcpName) !== attempt) {
+        log.info("stale oauth completion ignored", { mcpName })
+        return { status: "failed", error: "OAuth attempt superseded" } as Status
+      }
       pendingOAuthTransports.delete(mcpName)
+      yield* auth.clearCodeVerifier(mcpName)
 
       const resolved = yield* getMcpConfig(mcpName)
       if (!resolved) return { status: "failed", error: "MCP config not found after auth" } as Status
 
-      return yield* createAndStore(mcpName, resolved.mcp, hostEffectiveSampling(resolved.mcp, resolved.hostOwned))
+      return yield* createAndStore(mcpName, resolved.mcp, hostEffectiveSampling(resolved.mcp, fromHost), {
+        fromHost,
+        hostRevision,
+      })
     })
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
