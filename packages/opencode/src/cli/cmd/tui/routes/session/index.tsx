@@ -33,6 +33,11 @@ import type {
 } from "@mimo-ai/sdk/v2"
 import { useLocal } from "@tui/context/local"
 import { Locale } from "@/util"
+import {
+  recoverErrorMessage,
+  runSessionRecover,
+  type RecoverCandidate,
+} from "./recover-flow"
 import { verifySessionRenderable, type SessionActorInput } from "@/session/visibility"
 import type { Tool } from "@/tool"
 import type { ReadTool } from "@/tool/read"
@@ -202,7 +207,7 @@ export function Session() {
     const message = lastAssistant()
     if (!message || currentAgentID() !== "main") return undefined
     return sync.data.session_recovery[route.sessionID]?.find(
-      (candidate) => candidate.assistantMessageID === message.id,
+      (candidate) => candidate.kind === "assistant" && candidate.assistantMessageID === message.id,
     )
   })
 
@@ -508,30 +513,58 @@ export function Session() {
   const language = useLanguage()
   const t = language.t
   const recoveryErrorMessage = (error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error)
-    return /busy|409/i.test(message) ? t("tui.toast.session.recover.busy") : message
+    const mapped = recoverErrorMessage(error)
+    return mapped.variant === "busy" ? t("tui.toast.session.recover.busy") : mapped.message
   }
 
   const recover = async (assistantMessageID?: string) => {
-    const candidates = await sdk.client.session.recovery(
-      { sessionID: route.sessionID },
-      { throwOnError: true },
-    )
-    const candidate = assistantMessageID
-      ? candidates.data?.find((item) => item.assistantMessageID === assistantMessageID)
-      : candidates.data?.at(-1)
-    if (!candidate) {
+    const outcome = await runSessionRecover({
+      status: sync.data.session_status[route.sessionID],
+      assistantMessageID,
+      listCandidates: async () => {
+        const candidates = await sdk.client.session.recovery({ sessionID: route.sessionID }, { throwOnError: true })
+        return (candidates.data ?? []) as RecoverCandidate[]
+      },
+      resumeUser: async ({ userMessageID }) => {
+        await sdk.client.session.resumeUser(
+          {
+            sessionID: route.sessionID,
+            userMessageID: userMessageID as never,
+            titleLocale: language.intl(),
+          },
+          { throwOnError: true },
+        )
+      },
+      resumeAssistant: async ({ assistantMessageID: id }) => {
+        await sdk.client.session.resume(
+          {
+            sessionID: route.sessionID,
+            assistantMessageID: id as never,
+            titleLocale: language.intl(),
+          },
+          { throwOnError: true },
+        )
+      },
+      setActive: (id) => sync.set("session_recovery_active", route.sessionID, id as never),
+    })
+    if (outcome.type === "none") {
       toast.show({ message: t("tui.toast.session.recover.none"), variant: "info" })
       return
     }
-    await sdk.client.session.resume(
-      { sessionID: route.sessionID, assistantMessageID: candidate.assistantMessageID, titleLocale: language.intl() },
-      { throwOnError: true },
-    )
+    if (outcome.type === "busy") {
+      toast.show({ message: t("tui.toast.session.recover.busy"), variant: "info" })
+      return
+    }
+    if (outcome.type === "error") {
+      toast.show({
+        message: outcome.variant === "busy" ? t("tui.toast.session.recover.busy") : outcome.message,
+        variant: "error",
+      })
+      return
+    }
     // 202 = engine accepted; both resume kinds start a run. Do not GET recovery here:
     // recovery without allowBusy returns [] while busy, which would false-report "nothing to recover".
     // Clearing relies on session.status→idle / session.error (see sync.tsx).
-    sync.set("session_recovery_active", route.sessionID, candidate.assistantMessageID)
     toast.show({ message: t("tui.toast.session.recover.started"), variant: "info" })
   }
 
@@ -546,11 +579,8 @@ export function Session() {
       },
       onSelect: async (dialog) => {
         try {
-          const candidate = recoveryCandidate()
-          const status = sync.data.session_status[route.sessionID]
-          if (status?.type === "busy" || status?.type === "retry") {
-            toast.show({ message: t("tui.toast.session.recover.busy"), variant: "info" })
-          } else await recover(candidate?.assistantMessageID)
+          const c = recoveryCandidate()
+          await recover(c && c.kind === "assistant" ? c.assistantMessageID : undefined)
         } catch (error) {
           toast.show({
             message: recoveryErrorMessage(error),
@@ -1500,10 +1530,10 @@ export function Session() {
                         last={lastAssistant()?.id === message.id}
                         message={message as AssistantMessage}
                         parts={sync.data.part[message.id] ?? []}
-                        recoverable={
-                          recoveryCandidate()?.assistantMessageID === message.id &&
-                          sync.session.status(route.sessionID) === "idle"
-                        }
+                        recoverable={(() => {
+                          const c = recoveryCandidate()
+                          return !!(c && c.kind === "assistant" && c.assistantMessageID === message.id && sync.session.status(route.sessionID) === "idle")
+                        })()}
                         recovering={sync.data.session_recovery_active[route.sessionID] === message.id}
                         onRecover={recover}
                       />
