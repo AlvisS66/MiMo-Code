@@ -5,6 +5,7 @@ import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionID } from "./schema"
 import { SessionStatus } from "./status"
+import { orphanToolIdleSweepRef, assistantMessageIdsSnapshotRef } from "./orphan-tool-idle-hook"
 
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID, agentID?: string) => Effect.Effect<void, Session.BusyError>
@@ -74,18 +75,12 @@ export const layer = Layer.effect(
       const next = Runner.make<MessageV2.WithParts, never, Session.BusyError>(data.scope, {
         label: `${sessionID}:${agentID}`,
         onReentryWarn: (info) => elog.warn("runner-reentry", info),
-        // Cleanup only when THIS runner is actually idle. Cancel must never
-        // delete a map entry that has already been replaced by a newer run.
-        onIdle: isMain
-          ? Effect.gen(function* () {
-              byAgent.delete(agentID)
-              if (byAgent.size === 0) data.runners.delete(sessionID)
-              yield* status.set(sessionID, { type: "idle" })
-            })
-          : Effect.sync(() => {
-              byAgent.delete(agentID)
-              if (byAgent.size === 0) data.runners.delete(sessionID)
-            }),
+        // Do NOT delete Runners on idle: a waiter parked on Cancelling retries
+        // on this same instance after Idle — deleting it would start B on an
+        // unregistered Runner (RL-ORPHAN-C01). Applies to main AND non-main
+        // (Cancelling-wait is agent-agnostic in Runner.ensureRunning).
+        // Session idle status is main-only (actors do not publish session idle).
+        onIdle: isMain ? status.set(sessionID, { type: "idle" }) : Effect.void,
         onBusy: isMain ? status.set(sessionID, { type: "busy" }) : Effect.void,
         // Child executors must observe cancellation, not a stale assistant.
         onInterrupt: isMain ? onInterrupt : Effect.interrupt,
@@ -102,6 +97,30 @@ export const layer = Layer.effect(
       return
     })
 
+    /**
+     * Snapshot assistant message IDs while work is still exiting, then sweep
+     * orphans only on that set (RL-ORPHAN-D01). Field evidence: the original
+     * orphan sat on an INCOMPLETE assistant (completed only stamped at next
+     * prompt entry as Abandoned). Snapshot covers those messages; new turns
+     * create new message IDs and cannot enter an earlier snapshot.
+     */
+    const withOrphanSweep = (sessionID: SessionID, agentID: string, work: Effect.Effect<MessageV2.WithParts>) => {
+      if (agentID !== "main") return work
+      return work.pipe(
+        Effect.ensuring(
+          Effect.suspend(() =>
+            Effect.gen(function* () {
+              const sweep = orphanToolIdleSweepRef.current
+              const snapshot = assistantMessageIdsSnapshotRef.current
+              if (!sweep || !snapshot) return
+              const ownedMessageIds = yield* snapshot(sessionID)
+              yield* sweep(sessionID, { ownedMessageIds }).pipe(Effect.ignore)
+            }),
+          ),
+        ),
+      )
+    }
+
     const start: Interface["start"] = Effect.fn("SessionRunState.start")(function* (
       sessionID: SessionID,
       agentID: string,
@@ -109,7 +128,7 @@ export const layer = Layer.effect(
       work: Effect.Effect<MessageV2.WithParts>,
     ) {
       const active = yield* runner(sessionID, agentID, onInterrupt)
-      yield* active.start(work)
+      yield* active.start(withOrphanSweep(sessionID, agentID, work))
       return
     })
 
@@ -141,10 +160,8 @@ export const layer = Layer.effect(
       const stillBusy = current ? [...current.values()].some((r) => r.busy) : false
       if (stillBusy) return
       if (current) {
-        for (const [agentID, r] of [...current.entries()]) {
-          if (!r.busy) current.delete(agentID)
-        }
-        if (current.size === 0) after.runners.delete(sessionID)
+        // Keep Runners registered (Idle): waiters parked on Cancelling retry
+        // on this instance (RL-ORPHAN-C01). Do not delete here.
       }
       // Main onIdle also sets idle; force-clear when main was already gone so
       // `/session/status` never stays busy after a successful abort.
@@ -167,7 +184,7 @@ export const layer = Layer.effect(
       onInterrupt: Effect.Effect<MessageV2.WithParts>,
       work: Effect.Effect<MessageV2.WithParts>,
     ) {
-      return yield* (yield* runner(sessionID, agentID, onInterrupt)).ensureRunning(work)
+      return yield* (yield* runner(sessionID, agentID, onInterrupt)).ensureRunning(withOrphanSweep(sessionID, agentID, work))
     })
 
     const startShell = Effect.fn("SessionRunState.startShell")(function* (

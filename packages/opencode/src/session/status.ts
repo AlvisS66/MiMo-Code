@@ -107,12 +107,19 @@ export const layer = Layer.effect(
           waitMs: Math.max(0, normalized.next - Date.now()),
         })
       }
-      yield* bus.publish(Event.Status, { sessionID, status: normalized })
       if (normalized.type === "idle") {
-        yield* bus.publish(Event.Idle, { sessionID })
+        // Orphan tool sweep is NOT done here. finishRun already flipped the
+        // Runner to Idle before onIdle → status.set, so this is not an
+        // execution-ownership boundary (RL-ORPHAN-D01). Primary sweep is
+        // SessionRunState's work ensuring (Runner still Running). Publish idle
+        // only — tool terminal states from that ensuring have already been
+        // persisted and emitted.
         data.statuses.delete(sessionID)
         data.retryAttempts.delete(sessionID)
+        yield* bus.publish(Event.Status, { sessionID, status: normalized })
+        yield* bus.publish(Event.Idle, { sessionID })
       } else {
+        yield* bus.publish(Event.Status, { sessionID, status: normalized })
         data.statuses.set(sessionID, normalized)
       }
       return normalized

@@ -1,13 +1,16 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
+import { Bus } from "../../src/bus"
 import { Instance } from "../../src/project/instance"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import { SessionRunState } from "../../src/session/run-state"
 import { SessionStatus } from "../../src/session/status"
 import { MessageV2 } from "../../src/session/message-v2"
+import { orphanToolIdleSweepRef } from "../../src/session/orphan-tool-idle-hook"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -20,12 +23,13 @@ const it = testEffect(
   Layer.mergeAll(
     SessionPrompt.defaultLayer,
     Session.defaultLayer,
-    SessionStatus.defaultLayer,
+    SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer)),
+    SessionRunState.layer.pipe(Layer.provide(SessionStatus.defaultLayer)),
     CrossSpawnSpawner.defaultLayer,
   ),
 )
 
-const seedRunningToolPart = (dir: string, sessionID: SessionID) =>
+const seedRunningToolPart = (dir: string, sessionID: SessionID, opts?: { completeMessage?: boolean }) =>
   Effect.gen(function* () {
     const sessions = yield* Session.Service
     const user = yield* sessions.updateMessage({
@@ -36,6 +40,7 @@ const seedRunningToolPart = (dir: string, sessionID: SessionID) =>
       model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") },
       time: { created: Date.now() },
     })
+    const now = Date.now()
     const assistant = yield* sessions.updateMessage({
       id: MessageID.ascending(),
       role: "assistant" as const,
@@ -48,7 +53,7 @@ const seedRunningToolPart = (dir: string, sessionID: SessionID) =>
       modelID: ModelID.make("test-model"),
       providerID: ProviderID.make("test"),
       parentID: user.id,
-      time: { created: Date.now() },
+      time: opts?.completeMessage ? { created: now, completed: now } : { created: now },
     })
     return yield* sessions.updatePart({
       id: PartID.ascending(),
@@ -76,6 +81,17 @@ const readPart = (sessionID: SessionID, partID: string) =>
     return undefined
   })
 
+const dummyWork = (sessionID: SessionID) =>
+  Effect.succeed({
+    info: {
+      id: MessageID.ascending(),
+      role: "assistant" as const,
+      sessionID,
+      time: { created: Date.now() },
+    },
+    parts: [],
+  } as unknown as MessageV2.WithParts)
+
 describe("sweepOrphanToolParts", () => {
   it.live("repairs a tool part orphaned at running when the session is idle", () =>
     provideTmpdirInstance((dir) =>
@@ -94,7 +110,6 @@ describe("sweepOrphanToolParts", () => {
         if (after.state.status !== "error") throw new Error("expected an error state")
         expect(after.state.error).toBe("Tool execution aborted")
         expect(after.state.metadata?.interrupted).toBe(true)
-        // The original start time survives so the transcript keeps its duration.
         expect(after.state.time.start).toBe(part.state.status === "running" ? part.state.time.start : 0)
       }),
     ),
@@ -109,8 +124,6 @@ describe("sweepOrphanToolParts", () => {
         const session = yield* sessions.create({})
         const part = yield* seedRunningToolPart(dir, session.id)
 
-        // A CURRENTLY EXECUTING tool is persisted as `running` too — this is the
-        // half that matters: a sweep that fires here would corrupt a live turn.
         yield* status.set(session.id, { type: "busy" })
         yield* svc.sweepOrphanToolParts(session.id)
 
@@ -190,6 +203,286 @@ describe("sweepOrphanToolParts", () => {
         const after = yield* readPart(session.id, part.id)
         if (after?.type !== "tool") throw new Error("expected a tool part")
         expect(after.state.status).toBe("completed")
+      }),
+    ),
+  )
+
+  it.live("skips a running part that started after the before-cutoff", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const svc = yield* SessionPrompt.Service
+        const session = yield* sessions.create({})
+        const part = yield* seedRunningToolPart(dir, session.id)
+        const started = part.state.status === "running" ? part.state.time.start : Date.now()
+
+        yield* svc.sweepOrphanToolParts(session.id, { before: started - 1 })
+
+        const after = yield* readPart(session.id, part.id)
+        if (after?.type !== "tool") throw new Error("expected a tool part")
+        expect(after.state.status).toBe("running")
+      }),
+    ),
+  )
+
+  // [RL-ORPHAN-D01] Field evidence: orphan sat on an INCOMPLETE assistant
+  // (completed only stamped at next prompt as Abandoned). Snapshot ownership
+  // by message ID at ensuring time covers that set.
+  it.live("work ensuring aborts orphans on snapshotted messages including incomplete", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const runState = yield* SessionRunState.Service
+        yield* SessionPrompt.Service
+        const session = yield* sessions.create({})
+        // Incomplete — matches field parent msg_g001a0bb2e89bb001WTFuV6NUk
+        const part = yield* seedRunningToolPart(dir, session.id, { completeMessage: false })
+
+        yield* runState.ensureRunning(session.id, "main", Effect.die("no-interrupt"), dummyWork(session.id))
+
+        const after = yield* readPart(session.id, part.id)
+        if (after?.type !== "tool") throw new Error("expected a tool part")
+        expect(after.state.status).toBe("error")
+        if (after.state.status !== "error") throw new Error("expected an error state")
+        expect(after.state.error).toBe("Tool execution aborted")
+      }),
+    ),
+  )
+
+  it.live("sweep skips messages not in ownedMessageIds snapshot", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const svc = yield* SessionPrompt.Service
+        const session = yield* sessions.create({})
+        const part = yield* seedRunningToolPart(dir, session.id, { completeMessage: false })
+
+        // Empty snapshot — nothing owned, nothing rewritten.
+        yield* svc.sweepOrphanToolParts(session.id, { ownedMessageIds: new Set() })
+
+        const after = yield* readPart(session.id, part.id)
+        if (after?.type !== "tool") throw new Error("expected a tool part")
+        expect(after.state.status).toBe("running")
+      }),
+    ),
+  )
+
+  // [RL-ORPHAN-D01] Cancel handoff: Runner stays Cancelling until the retiring
+  // fiber's finalizers finish; ensureRunning waits instead of starting B mid-sweep.
+  it.live("new work waits for cancel finalizer before starting", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const runState = yield* SessionRunState.Service
+        yield* SessionPrompt.Service
+        const session = yield* sessions.create({})
+
+        const order: string[] = []
+        const real = orphanToolIdleSweepRef.current
+        expect(real).toBeDefined()
+        orphanToolIdleSweepRef.current = (sid, opts) =>
+          Effect.gen(function* () {
+            order.push("sweep-start")
+            yield* Effect.sleep("80 millis")
+            order.push("sweep-end")
+            yield* real!(sid, opts)
+          })
+
+        const workA = Effect.gen(function* () {
+          order.push("A-body")
+          yield* Effect.sleep("150 millis")
+          return yield* dummyWork(session.id)
+        })
+
+        try {
+          const fiberA = yield* runState
+            .ensureRunning(session.id, "main", Effect.void as never, workA)
+            .pipe(Effect.exit, Effect.forkChild)
+          yield* Effect.sleep("40 millis")
+          yield* runState.cancel(session.id)
+          yield* runState.ensureRunning(session.id, "main", Effect.void as never, dummyWork(session.id))
+          yield* Fiber.join(fiberA).pipe(Effect.ignore)
+        } finally {
+          orphanToolIdleSweepRef.current = real
+        }
+
+        expect(order).toContain("sweep-end")
+      }),
+    ),
+  )
+
+  // [RL-ORPHAN-C01/C03] Deterministic Cancelling barrier: hold inside ensuring,
+  // signal entry, start B, verify B does not run until release; B's success
+  // Exit is asserted (failures must not be swallowed).
+  it.live("RunState registry tracks work that waited out Cancelling", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const runState = yield* SessionRunState.Service
+        yield* SessionPrompt.Service
+        const session = yield* sessions.create({})
+
+        const hold = yield* Deferred.make<void>()
+        const inFinalizer = yield* Deferred.make<void>()
+        const startedA = yield* Deferred.make<void>()
+        let bRan = false
+
+        const workA = Effect.gen(function* () {
+          yield* Deferred.succeed(startedA, undefined)
+          yield* Effect.never
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(inFinalizer, undefined)
+              yield* Deferred.await(hold)
+            }),
+          ),
+          Effect.as(undefined as never),
+        )
+
+        const fiberA = yield* runState
+          .ensureRunning(session.id, "main", Effect.void as never, workA)
+          .pipe(Effect.exit, Effect.forkChild)
+        yield* Deferred.await(startedA)
+
+        const cancelFiber = yield* runState.cancel(session.id).pipe(Effect.forkChild)
+        // Wait until A's ensuring (finalizer) is actually blocked.
+        yield* Deferred.await(inFinalizer)
+
+        const exitB = yield* runState
+          .ensureRunning(
+            session.id,
+            "main",
+            Effect.void as never,
+            Effect.gen(function* () {
+              bRan = true
+              // Must be the registered busy runner while B executes.
+              const busyExit = yield* runState.assertNotBusy(session.id, "main").pipe(Effect.exit)
+              expect(Exit.isFailure(busyExit)).toBe(true)
+              return yield* dummyWork(session.id)
+            }),
+          )
+          .pipe(Effect.exit, Effect.forkChild)
+
+        yield* Effect.sleep("20 millis")
+        expect(bRan).toBe(false)
+
+        yield* Deferred.succeed(hold, undefined)
+        yield* Fiber.join(fiberA).pipe(Effect.ignore)
+        yield* Fiber.join(cancelFiber).pipe(Effect.ignore)
+        const bResult = yield* Fiber.join(exitB)
+        expect(Exit.isSuccess(bResult)).toBe(true)
+        expect(bRan).toBe(true)
+        yield* runState.assertNotBusy(session.id, "main")
+      }),
+    ),
+  )
+
+  // [RL-ORPHAN-C03] Order lock: PartUpdated (error) and session.status (idle)
+  // are both recorded from async Bus callbacks. PartUpdated goes through
+  // ProjectBus (standalone Bus.subscribe); Status through the test Status
+  // layer's Bus. Both schedule Promise.then at publish time, so observed
+  // callback order matches publish order on the JS event loop.
+  it.live("orphan sweep completes before session.status idle is published", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const status = yield* SessionStatus.Service
+        const bus = yield* Bus.Service
+        const runState = yield* SessionRunState.Service
+        yield* SessionPrompt.Service
+        const session = yield* sessions.create({})
+        const part = yield* seedRunningToolPart(dir, session.id, { completeMessage: false })
+        yield* status.set(session.id, { type: "busy" })
+
+        const order: string[] = []
+        // Standalone Bus matches ProjectBus.publish used by SyncEvent PartUpdated.
+        const unsubPart = Bus.subscribe(MessageV2.Event.PartUpdated, (ev) => {
+          const p = ev.properties.part
+          if (p.id === part.id && (p as { state?: { status?: string } }).state?.status === "error") {
+            order.push("part-error")
+          }
+        })
+        const offStatus = yield* bus.subscribeCallback(SessionStatus.Event.Status, (evt) => {
+          if (evt.properties.sessionID === session.id && evt.properties.status.type === "idle") {
+            order.push("status-idle")
+          }
+        })
+
+        try {
+          yield* runState.ensureRunning(session.id, "main", Effect.void as never, dummyWork(session.id))
+          yield* Effect.sleep("100 millis")
+        } finally {
+          offStatus()
+          unsubPart()
+        }
+
+        expect(order).toContain("part-error")
+        expect(order).toContain("status-idle")
+        expect(order.indexOf("part-error")).toBeLessThan(order.indexOf("status-idle"))
+      }),
+    ),
+  )
+
+  // [RL-ORPHAN-C03] Same order lock on the cancel path.
+  it.live("cancel path: sweep completes before session.status idle", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const bus = yield* Bus.Service
+        const runState = yield* SessionRunState.Service
+        yield* SessionPrompt.Service
+        const session = yield* sessions.create({})
+        const part = yield* seedRunningToolPart(dir, session.id, { completeMessage: false })
+
+        const order: string[] = []
+        const unsubPart = Bus.subscribe(MessageV2.Event.PartUpdated, (ev) => {
+          const p = ev.properties.part
+          if (p.id === part.id && (p as { state?: { status?: string } }).state?.status === "error") {
+            order.push("part-error")
+          }
+        })
+        const offStatus = yield* bus.subscribeCallback(SessionStatus.Event.Status, (evt) => {
+          if (evt.properties.sessionID === session.id && evt.properties.status.type === "idle") {
+            order.push("status-idle")
+          }
+        })
+
+        const hold = yield* Deferred.make<void>()
+        const inFinalizer = yield* Deferred.make<void>()
+        const startedA = yield* Deferred.make<void>()
+        const workA = Effect.gen(function* () {
+          yield* Deferred.succeed(startedA, undefined)
+          yield* Effect.never
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(inFinalizer, undefined)
+              yield* Deferred.await(hold)
+            }),
+          ),
+          Effect.as(undefined as never),
+        )
+
+        try {
+          const fiberA = yield* runState
+            .ensureRunning(session.id, "main", Effect.void as never, workA)
+            .pipe(Effect.exit, Effect.forkChild)
+          yield* Deferred.await(startedA)
+          const cancelFiber = yield* runState.cancel(session.id).pipe(Effect.forkChild)
+          yield* Deferred.await(inFinalizer)
+          yield* Deferred.succeed(hold, undefined)
+          yield* Fiber.join(fiberA).pipe(Effect.ignore)
+          yield* Fiber.join(cancelFiber).pipe(Effect.ignore)
+          yield* Effect.sleep("100 millis")
+        } finally {
+          offStatus()
+          unsubPart()
+        }
+
+        expect(order).toContain("part-error")
+        expect(order).toContain("status-idle")
+        expect(order.indexOf("part-error")).toBeLessThan(order.indexOf("status-idle"))
       }),
     ),
   )
