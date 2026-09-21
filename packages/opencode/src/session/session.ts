@@ -476,7 +476,7 @@ export interface Interface {
   readonly setRevert: (input: {
     sessionID: SessionID
     revert: Info["revert"]
-    summary: Info["summary"]
+    summary?: Info["summary"]
   }) => Effect.Effect<void>
   readonly clearRevert: (sessionID: SessionID) => Effect.Effect<void>
   readonly setSummary: (input: { sessionID: SessionID; summary: Info["summary"] }) => Effect.Effect<void>
@@ -865,9 +865,16 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
     const setRevert = Effect.fn("Session.setRevert")(function* (input: {
       sessionID: SessionID
       revert: Info["revert"]
-      summary: Info["summary"]
+      summary?: Info["summary"]
     }) {
-      yield* patch(input.sessionID, { summary: input.summary, time: { updated: Date.now() }, revert: input.revert })
+      // `summary` omitted means "leave the current statistics untouched" — a
+      // bare `undefined` would be rejected by the projectors (explicit `null`
+      // is their clear-a-field form).
+      yield* patch(input.sessionID, {
+        time: { updated: Date.now() },
+        revert: input.revert,
+        ...(input.summary !== undefined ? { summary: input.summary } : {}),
+      })
     })
 
     const clearRevert = Effect.fn("Session.clearRevert")(function* (sessionID: SessionID) {

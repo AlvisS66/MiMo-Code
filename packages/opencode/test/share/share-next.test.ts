@@ -2,6 +2,8 @@ import { NodeFileSystem } from "@effect/platform-node"
 import { beforeEach, describe, expect } from "bun:test"
 import { Effect, Exit, Layer, Option } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+import fs from "fs/promises"
+import path from "path"
 
 import { AccessToken, AccountID, OrgID, RefreshToken } from "../../src/account/schema"
 import { Account } from "../../src/account/account"
@@ -13,9 +15,12 @@ import { Provider } from "../../src/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
+import { SessionSummary } from "../../src/session/summary"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { ShareNext } from "../../src/share"
 import { SessionShareTable } from "../../src/share/share.sql"
+import { Snapshot } from "../../src/snapshot"
+import { Storage } from "../../src/storage"
 import { Database, eq } from "../../src/storage"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -48,6 +53,7 @@ function live(client: HttpClient.HttpClient) {
     Layer.provide(http),
     Layer.provide(Provider.defaultLayer),
     Layer.provide(Session.defaultLayer),
+    Layer.provide(SessionSummary.defaultLayer),
   )
 }
 
@@ -57,15 +63,19 @@ function wired(client: HttpClient.HttpClient) {
     Bus.layer,
     ShareNext.layer,
     Session.defaultLayer,
+    SessionSummary.defaultLayer,
     AccountRepo.layer,
     NodeFileSystem.layer,
     CrossSpawnSpawner.defaultLayer,
+    Snapshot.defaultLayer,
+    Storage.defaultLayer,
   ).pipe(
     Layer.provide(Bus.layer),
     Layer.provide(Account.layer.pipe(Layer.provide(AccountRepo.layer), Layer.provide(http))),
     Layer.provide(Config.defaultLayer),
     Layer.provide(http),
     Layer.provide(Provider.defaultLayer),
+    Layer.provide(SessionSummary.defaultLayer),
   )
 }
 
@@ -428,6 +438,126 @@ describe("ShareNext", () => {
         }).pipe(Effect.provide(wired(client)))
       },
       { config: { enterprise: { url: "https://legacy-share.example.com" } } },
+    ),
+  )
+
+  it.live("enriches statistics-only session_diff payloads with patch content before upload", () =>
+    provideTmpdirInstance(
+      (dir) => {
+        const seen: Array<{ url: string; body: string }> = []
+        const client = HttpClient.make((req) => {
+          if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
+            seen.push({ url: req.url, body: new TextDecoder().decode(req.body.body) })
+          }
+          return Effect.succeed(json(req, { ok: true }))
+        })
+
+        return Effect.gen(function* () {
+          const bus = yield* Bus.Service
+          const share = yield* ShareNext.Service
+          const session = yield* Session.Service
+          const snapshot = yield* Snapshot.Service
+          const storage = yield* Storage.Service
+
+          const info = yield* session.create({ title: "patch backfill" })
+
+          // A real snapshot pair so the on-demand regeneration has content.
+          const file = path.join(dir, "a.ts")
+          yield* Effect.promise(() => fs.writeFile(file, "one\n"))
+          const from = yield* snapshot.track()
+          yield* Effect.promise(() => fs.writeFile(file, "two\n"))
+          const to = yield* snapshot.track()
+          expect(from).toBeDefined()
+          expect(to).toBeDefined()
+
+          const messageID = MessageID.ascending()
+          yield* session.updateMessage({
+            id: messageID,
+            sessionID: info.id,
+            role: "assistant",
+            parentID: MessageID.ascending(),
+            modelID: ModelID.make("test-model"),
+            providerID: ProviderID.make("test-provider"),
+            mode: "",
+            agent: "main",
+            path: { cwd: dir, root: dir },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: 1, completed: 2 },
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID,
+            sessionID: info.id,
+            type: "step-start",
+            snapshot: from!,
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID,
+            sessionID: info.id,
+            type: "step-finish",
+            reason: "stop",
+            snapshot: to!,
+            cost: 0,
+            tokens: {
+              input: 0,
+              output: 0,
+              reasoning: 0,
+              cache: { read: 0, write: 0 },
+            },
+          })
+
+          // Statistics-only cache — the hot-path shape after patch decoupling.
+          yield* storage.write(["session_diff", info.id], [
+            { file: "a.ts", patch: "", additions: 1, deletions: 1, status: "modified" },
+          ])
+
+          yield* Effect.sync(() =>
+            Database.use((db) =>
+              db
+                .insert(SessionShareTable)
+                .values({
+                  session_id: info.id,
+                  id: "shr_backfill",
+                  url: "https://legacy-share.example.com/share/backfill",
+                  secret: "sec_backfill",
+                })
+                .run(),
+            ),
+          )
+
+          // Subscriptions start only here so the pre-share Session.Updated
+          // event doesn't negatively cache the share lookup before the row
+          // exists.
+          yield* share.init()
+          yield* Effect.sleep(50)
+
+          yield* bus.publish(Session.Event.Diff, {
+            sessionID: info.id,
+            diff: [{ file: "a.ts", patch: "", additions: 1, deletions: 1, status: "modified" }],
+          })
+
+          yield* Effect.gen(function* () {
+            while (!seen.length) yield* Effect.sleep(50)
+          }).pipe(Effect.timeout(5_000))
+          yield* Effect.sleep(250)
+
+          expect(seen).toHaveLength(1)
+          const body = JSON.parse(seen[0].body) as {
+            secret: string
+            data: Array<{ type: string; data: Array<{ file: string; patch: string }> }>
+          }
+          expect(body.secret).toBe("sec_backfill")
+          expect(body.data[0].type).toBe("session_diff")
+          const entry = body.data[0].data.find((item) => item.file === "a.ts")
+          expect(entry).toBeDefined()
+          expect(entry!.patch).toContain("@@")
+          expect(entry!.patch).toContain("-one")
+          expect(entry!.patch).toContain("+two")
+        }).pipe(Effect.provide(wired(client)))
+      },
+      { git: true, config: { enterprise: { url: "https://legacy-share.example.com" } } },
     ),
   )
 })
