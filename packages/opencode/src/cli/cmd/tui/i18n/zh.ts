@@ -119,8 +119,6 @@ export const dict = {
   "tui.tips.disable_formatter": '在配置中设置 {highlight}"formatter": false{/highlight} 关闭所有自动格式化',
   "tui.tips.custom_formatter": "在配置中按文件后缀定义自定义格式化命令",
   "tui.tips.lsp": "MiMoCode 使用 LSP 服务器进行智能代码分析",
-  "tui.tips.custom_tool":
-    "在 {highlight}.mimocode/tools/{/highlight} 创建 {highlight}.ts{/highlight} 文件定义新的 LLM 工具",
   "tui.tips.tool_scripts": "工具定义可以调用 Python、Go 等脚本",
   "tui.tips.plugins":
     "在 {highlight}.mimocode/plugin/{/highlight} 添加 {highlight}.ts{/highlight} 文件挂接事件钩子",

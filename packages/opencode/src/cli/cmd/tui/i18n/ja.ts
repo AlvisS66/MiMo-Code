@@ -136,8 +136,6 @@ export const dict = {
     '設定で {highlight}"formatter": false{/highlight} にするとすべての自動整形を無効化できます',
   "tui.tips.custom_formatter": "拡張子ごとのカスタム整形コマンドを設定で定義できます",
   "tui.tips.lsp": "MiMoCode はインテリジェントなコード解析に LSP サーバを使います",
-  "tui.tips.custom_tool":
-    "{highlight}.mimocode/tools/{/highlight} に {highlight}.ts{/highlight} ファイルを作って新しい LLM ツールを定義します",
   "tui.tips.tool_scripts": "ツール定義から Python、Go などのスクリプトを呼び出せます",
   "tui.tips.plugins":
     "{highlight}.mimocode/plugin/{/highlight} に {highlight}.ts{/highlight} ファイルを追加してイベントフックを実装できます",

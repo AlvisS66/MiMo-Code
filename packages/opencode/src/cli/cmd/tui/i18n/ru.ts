@@ -162,8 +162,6 @@ export const dict = {
   "tui.tips.custom_formatter":
     "Определяйте собственные команды форматирования по расширениям файлов в конфиге",
   "tui.tips.lsp": "MiMoCode использует LSP-серверы для интеллектуального анализа кода",
-  "tui.tips.custom_tool":
-    "Создавайте файлы {highlight}.ts{/highlight} в {highlight}.mimocode/tools/{/highlight}, чтобы определить новые LLM-инструменты",
   "tui.tips.tool_scripts":
     "Определения инструментов могут вызывать скрипты на Python, Go и других языках",
   "tui.tips.plugins":

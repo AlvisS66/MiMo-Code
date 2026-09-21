@@ -126,8 +126,6 @@ export const dict: Record<string, string> = {
   "tui.tips.disable_formatter": 'Set {highlight}"formatter": false{/highlight} in config to disable all auto-formatting',
   "tui.tips.custom_formatter": "Define custom formatter commands with file extensions in config",
   "tui.tips.lsp": "MiMoCode uses LSP servers for intelligent code analysis",
-  "tui.tips.custom_tool":
-    "Create {highlight}.ts{/highlight} files in {highlight}.mimocode/tools/{/highlight} to define new LLM tools",
   "tui.tips.tool_scripts": "Tool definitions can invoke scripts written in Python, Go, etc",
   "tui.tips.plugins":
     "Add {highlight}.ts{/highlight} files to {highlight}.mimocode/plugin/{/highlight} for event hooks",
