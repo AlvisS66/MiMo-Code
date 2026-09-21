@@ -4851,9 +4851,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               writerWaitMs: AUTO_WRITER_WAIT_MS,
               // The turn is mid-flight, so explain the stall: without this the
               // TUI would sit on a bare spinner for minutes with no reason.
-              onWaitingForWriter: status
-                .set(sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
-                .pipe(Effect.catch(() => Effect.void)),
+              // F55: only main owns session status — subagent onIdle never clears it.
+              onWaitingForWriter: (!agentID || agentID === "main")
+                ? status
+                    .set(sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
+                    .pipe(Effect.catch(() => Effect.void))
+                : Effect.void,
             })
             if (attempt === "rebuilt") {
               skipOverflowCheck = true
@@ -5478,8 +5481,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   llm,
                   candidates: maxModeCfg?.candidates,
                   retryConfig: cfg,
-                 setStatus: (message) =>
-                   status.set(sessionID, message ? { type: "busy", message } : { type: "busy" }),
+                  setStatus: (message) =>
+                    // F55: subagent must not own session status (onIdle is void for non-main).
+                    !agentID || agentID === "main"
+                      ? status.set(sessionID, message ? { type: "busy", message } : { type: "busy" })
+                      : Effect.void,
                   onRetry: (info) =>
                     bus.publish(Session.Event.RetryAttempt, {
                       sessionID,
@@ -5620,9 +5626,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 agent: lastUser.agent,
                 model: { providerID: model.providerID, id: model.id },
                 writerWaitMs: AUTO_WRITER_WAIT_MS,
-                onWaitingForWriter: status
-                  .set(sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
-                  .pipe(Effect.catch(() => Effect.void)),
+                // F55: only main owns session status — subagent onIdle never clears it.
+                onWaitingForWriter: (!agentID || agentID === "main")
+                  ? status
+                      .set(sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
+                      .pipe(Effect.catch(() => Effect.void))
+                  : Effect.void,
               })
               if (attempt2 === "rebuilt") {
                 skipOverflowCheck = true
@@ -6518,21 +6527,30 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const resume = Effect.fn("SessionPrompt.resume")(function* (input: ResumeTurnInput) {
       yield* state.assertNotBusy(input.sessionID, input.agentID)
+      // Single recovery() read (R003): no-ID callers take candidates.at(-1);
+      // explicit IDs look it up in the same snapshot. Avoids double-read TOCTOU.
       const candidates = yield* recovery({ sessionID: input.sessionID, agentID: input.agentID })
-      const candidate = candidates.find((item) =>
-        input.userMessageID
-          ? item.kind === "parent-user" && item.userMessageID === input.userMessageID
-          : item.kind === "assistant" && item.assistantMessageID === input.assistantMessageID,
-      )
+      const candidate = input.userMessageID || input.assistantMessageID
+        ? candidates.find((item) =>
+            input.userMessageID
+              ? item.kind === "parent-user" && item.userMessageID === input.userMessageID
+              : item.kind === "assistant" && item.assistantMessageID === input.assistantMessageID,
+          )
+        : candidates.at(-1)
       if (candidate === undefined) {
         return yield* Effect.fail(
           new NotFoundError({
             message: input.userMessageID
               ? "No resumable trailing user found for message " + input.userMessageID
-              : "No resumable interrupted turn found for assistant message " + input.assistantMessageID,
+              : input.assistantMessageID
+                ? "No resumable interrupted turn found for assistant message " + input.assistantMessageID
+                : "No resumable recovery candidate found for session " + input.sessionID,
           }),
         )
       }
+      const target = candidate.kind === "assistant"
+        ? { assistantMessageID: candidate.assistantMessageID }
+        : { userMessageID: candidate.userMessageID }
       const agentID = input.agentID ?? "main"
       // Validate model override before abandon: getModel failure must not stamp the old message first.
       if (input.model) {
@@ -6541,10 +6559,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const plan = yield* planResume({
         sessionID: input.sessionID,
         agentID,
-        assistantMessageID: input.assistantMessageID,
-        userMessageID: input.userMessageID,
+        assistantMessageID: target.assistantMessageID,
+        userMessageID: target.userMessageID,
       })
       if (plan.action === "reject") return yield* Effect.fail(plan.error)
+      // [R004] Test seam: expose resolved plan so tests can assert the actual target.
+      ResumeTestHooks.onPlanResolved?.({
+        action: plan.action,
+        ...(plan.action === "tool-resume" ? { assistantMessageID: plan.assistantMessageID } : {}),
+        parentMessageID: plan.parentMessageID,
+      })
       // [C004] Test seam: pause after ALL busy preflights (incl. planResume), before exclusive occupy.
       const beforeOccupy = ResumeTestHooks.beforeExclusiveOccupy
       if (beforeOccupy) yield* beforeOccupy()
@@ -6560,9 +6584,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       if (launched === undefined) {
         return yield* Effect.fail(
           new NotFoundError({
-            message: input.userMessageID
-              ? "Resume did not produce an assistant result for user " + input.userMessageID
-              : "Resume did not produce an assistant result for " + input.assistantMessageID,
+            message: target.userMessageID
+              ? "Resume did not produce an assistant result for user " + target.userMessageID
+              : "Resume did not produce an assistant result for " + target.assistantMessageID,
           }),
         )
       }
@@ -6570,21 +6594,30 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     })
 
     const resumeBackground = Effect.fn("SessionPrompt.resumeBackground")(function* (input: ResumeTurnInput) {
+      // Single recovery() read (R003): no-ID callers take candidates.at(-1);
+      // explicit IDs look it up in the same snapshot. Avoids double-read TOCTOU.
       const candidates = yield* recovery({ sessionID: input.sessionID, agentID: input.agentID, allowBusy: true })
-      const candidate = candidates.find((item) =>
-        input.userMessageID
-          ? item.kind === "parent-user" && item.userMessageID === input.userMessageID
-          : item.kind === "assistant" && item.assistantMessageID === input.assistantMessageID,
-      )
+      const candidate = input.userMessageID || input.assistantMessageID
+        ? candidates.find((item) =>
+            input.userMessageID
+              ? item.kind === "parent-user" && item.userMessageID === input.userMessageID
+              : item.kind === "assistant" && item.assistantMessageID === input.assistantMessageID,
+          )
+        : candidates.at(-1)
       if (candidate === undefined) {
         return yield* Effect.fail(
           new NotFoundError({
             message: input.userMessageID
               ? "No resumable trailing user found for message " + input.userMessageID
-              : "No resumable interrupted turn found for assistant message " + input.assistantMessageID,
+              : input.assistantMessageID
+                ? "No resumable interrupted turn found for assistant message " + input.assistantMessageID
+                : "No resumable recovery candidate found for session " + input.sessionID,
           }),
         )
       }
+      const target = candidate.kind === "assistant"
+        ? { assistantMessageID: candidate.assistantMessageID }
+        : { userMessageID: candidate.userMessageID }
       const agentID = input.agentID ?? "main"
       if (input.model) {
         yield* getModel(ProviderID.make(input.model.providerID), ModelID.make(input.model.modelID), input.sessionID)
@@ -6592,10 +6625,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const plan = yield* planResume({
         sessionID: input.sessionID,
         agentID,
-        assistantMessageID: input.assistantMessageID,
-        userMessageID: input.userMessageID,
+        assistantMessageID: target.assistantMessageID,
+        userMessageID: target.userMessageID,
       })
       if (plan.action === "reject") return yield* Effect.fail(plan.error)
+      // [R004] Test seam: expose resolved plan so tests can assert the actual target.
+      ResumeTestHooks.onPlanResolved?.({
+        action: plan.action,
+        ...(plan.action === "tool-resume" ? { assistantMessageID: plan.assistantMessageID } : {}),
+        parentMessageID: plan.parentMessageID,
+      })
       yield* launchResume({
         sessionID: input.sessionID,
         agentID,
