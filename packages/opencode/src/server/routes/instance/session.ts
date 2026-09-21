@@ -19,6 +19,7 @@ import { Snapshot } from "@/snapshot"
 import { Command } from "@/command"
 import { Log } from "@/util"
 import { ActorRegistry } from "@/actor/registry"
+import { ActorWaiter } from "@/actor/waiter"
 import { TaskRegistry } from "@/task/registry"
 import { Task } from "@/task/schema"
 import { Permission } from "@/permission"
@@ -1602,7 +1603,7 @@ export const SessionRoutes = lazy(() =>
       "/:sessionID/actors",
       describeRoute({
         summary: "List session actors",
-        description: "List actors registered for a session.",
+        description: "List actors with execution status in this server runtime; persisted outcomes are preserved.",
         operationId: "session.actors",
         responses: {
           200: {
@@ -1624,9 +1625,11 @@ export const SessionRoutes = lazy(() =>
           c,
           Effect.gen(function* () {
             const reg = yield* ActorRegistry.Service
+            const waiter = yield* ActorWaiter.Service
             const session = yield* Session.Service
             yield* session.get(sessionID)
-            return yield* reg.listBySession(sessionID)
+            const actors = yield* reg.listBySession(sessionID)
+            return yield* Effect.forEach(actors, waiter.status)
           }),
         )
         return c.json(actors)
