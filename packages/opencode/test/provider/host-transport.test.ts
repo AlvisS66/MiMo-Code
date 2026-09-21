@@ -26,3 +26,11 @@ test("without an embedder the model result and failure are unchanged", async () 
   const error = new Error("test failure")
   await expect(HostModelTransport.modelCall(scope, async () => { throw error })).rejects.toBe(error)
 })
+
+test("embedding request policy runs before a provider custom transport", async () => {
+  let forwarded = false
+  HostModelTransport.set({ userMessage() {}, modelCall: (_scope, next) => next(), request: async () => new Response("host response") })
+  const response = await HostModelTransport.request("https://test.invalid/responses", {}, async () => { forwarded = true; return new Response("provider response") })
+  expect(await response.text()).toBe("host response")
+  expect(forwarded).toBe(false)
+})
