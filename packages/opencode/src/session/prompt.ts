@@ -1,3 +1,4 @@
+import { HostModelTransport } from "../provider/host-transport"
 import path from "path"
 import os from "os"
 import z from "zod"
@@ -3218,6 +3219,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         systemMode: prompt.systemMode,
         harness: prompt.harness,
       }
+
+      HostModelTransport.userMessage({ sessionID: input.sessionID, userMessageID: message.id, parts })
 
       yield* plugin.trigger(
         "chat.message",
