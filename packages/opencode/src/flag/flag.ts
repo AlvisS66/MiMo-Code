@@ -436,7 +436,7 @@ export const Flag = {
     return truthy("MIMOCODE_DISABLE_COMPOSE_SKILLS")
   },
   // Disables user-facing builtin skills shipped with the binary (e.g.
-  // evolve). Does not affect compose skills — the two sets are
+  // mimocode-docs). Does not affect compose skills — the two sets are
   // independent and non-overlapping.
   get MIMOCODE_DISABLE_BUILTIN_SKILLS() {
     return truthy("MIMOCODE_DISABLE_BUILTIN_SKILLS")

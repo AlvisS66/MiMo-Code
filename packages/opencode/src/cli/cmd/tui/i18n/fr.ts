@@ -271,7 +271,6 @@ export const dict = {
   "tui.skill.pdf-official.description": "Créer, modifier, transformer et lire des fichiers PDF",
   "tui.skill.pptx-official.description": "Créer, modifier et lire des présentations Microsoft PowerPoint (.pptx)",
   "tui.skill.mimocode.description": "Documentation intégrée des fonctionnalités, config et commandes MiMoCode",
-  "tui.skill.evolve.description": "Réécrivez chaque couche de vous-même — outils, hooks, connaissances, workflows, même l'UI",
   "tui.skill.loop.description": "Planifier l'exécution récurrente d'un prompt",
   "tui.skill.html-to-video-pipeline.description": "L'arme ultime pour vidéos courtes — créez des vidéos courtes avec du HTML",
   "tui.skill.arxiv.description": "Rechercher, citer, télécharger et suivre des articles arXiv",
