@@ -7,6 +7,7 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { SessionRevert } from "../../src/session/revert"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Snapshot } from "../../src/snapshot"
+import { Storage } from "../../src/storage"
 import { Log } from "../../src/util"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
@@ -19,6 +20,7 @@ const env = Layer.mergeAll(
   Session.defaultLayer,
   SessionRevert.defaultLayer,
   Snapshot.defaultLayer,
+  Storage.defaultLayer,
   CrossSpawnSpawner.defaultLayer,
 )
 
@@ -632,6 +634,63 @@ describe("revert + compact workflow", () => {
           })
           expect((yield* session.get(sid)).revert).toBeUndefined()
           expect(yield* read(path.join(dir, "a.txt"))).toBe("a3")
+        }),
+      { git: true },
+    ),
+  )
+
+  it.live(
+    "revert completes with pruned-anchor diff failure and keeps previous statistics",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const storage = yield* Storage.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+
+          const u1 = yield* user(sid)
+          yield* text(sid, u1.id, "hello")
+          const a1 = yield* assistant(sid, u1.id, dir)
+          // Pruned-anchor anchors: git diff on these fails with `bad object`,
+          // which previously made revert clobber cached diff data with [].
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a1.id,
+            sessionID: sid,
+            type: "step-start",
+            snapshot: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a1.id,
+            sessionID: sid,
+            type: "step-finish",
+            reason: "stop",
+            snapshot: "feedfacefeedfacefeedfacefeedfacefeedface",
+            cost: 0,
+            tokens,
+          })
+
+          const previous = [
+            { file: "kept.txt", patch: "kept-patch", additions: 3, deletions: 1, status: "modified" as const },
+          ]
+          yield* storage.write(["session_diff", sid], previous)
+          const stats = { additions: 5, deletions: 2, files: 2 }
+          yield* session.setSummary({ sessionID: sid, summary: stats })
+
+          const done = yield* revert.revert({ sessionID: sid, messageID: u1.id })
+          expect(done.revert?.messageID).toBe(u1.id)
+
+          // Statistics and cached diff survive the failed recompute.
+          const after = yield* session.get(sid)
+          expect(after.summary?.additions).toBe(stats.additions)
+          expect(after.summary?.deletions).toBe(stats.deletions)
+          expect(after.summary?.files).toBe(stats.files)
+          const cached = yield* storage.read<typeof previous>(["session_diff", sid])
+          expect(cached).toEqual(previous)
         }),
       { git: true },
     ),

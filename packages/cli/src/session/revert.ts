@@ -75,17 +75,43 @@ export const layer = Layer.effect(
       yield* snap.revert(patches)
       if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot as string)
       const range = all.filter((msg) => msg.info.id >= rev!.messageID)
-      const diffs = yield* summary.computeDiff({ messages: range })
-      yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
-      yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
+      // Revert must complete even when the diff cannot be computed (e.g. a
+      // pruned snapshot anchor): skip the statistics overwrite so the last
+      // good session_diff data survives, but still record the revert itself.
+      const diffs = yield* summary.computeDiff({ messages: range }).pipe(
+        Effect.catch((error) => {
+          log.warn("failed to compute revert diff, keeping previous statistics", {
+            sessionID: input.sessionID,
+            error,
+          })
+          return Effect.succeed(null)
+        }),
+      )
+      if (diffs) {
+        yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
+        yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
+      }
+      // Echo back only the summary fields the projectors accept: a zod-parsed
+      // Info carries an explicit `diffs: undefined` key that round-tripping
+      // would reject ("pass null to clear a field").
+      const nextSummary = diffs
+        ? {
+            additions: diffs.reduce((sum, x) => sum + x.additions, 0),
+            deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
+            files: diffs.length,
+          }
+        : session.summary
+          ? {
+              additions: session.summary.additions,
+              deletions: session.summary.deletions,
+              files: session.summary.files,
+              ...(session.summary.diffs ? { diffs: session.summary.diffs } : {}),
+            }
+          : undefined
       yield* sessions.setRevert({
         sessionID: input.sessionID,
         revert: rev,
-        summary: {
-          additions: diffs.reduce((sum, x) => sum + x.additions, 0),
-          deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
-          files: diffs.length,
-        },
+        summary: nextSummary,
       })
       return yield* sessions.get(input.sessionID)
     })
