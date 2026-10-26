@@ -8,6 +8,7 @@ import { Provider } from "@/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Session } from "@/session"
 import { MessageV2 } from "@/session/message-v2"
+import { SessionSummary } from "@/session/summary"
 import type { SessionID } from "@/session/schema"
 import { Database, eq } from "@/storage"
 import { Config } from "@/config"
@@ -136,6 +137,7 @@ export const layer = Layer.effect(
     const httpOk = HttpClient.filterStatusOk(http)
     const provider = yield* Provider.Service
     const session = yield* Session.Service
+    const summary = yield* SessionSummary.Service
 
     function sync(sessionID: SessionID, data: Data[]): Effect.Effect<void> {
       return Effect.gen(function* () {
@@ -224,7 +226,22 @@ export const layer = Layer.effect(
               ]),
         )
         yield* watch(Session.Event.Diff, (evt) =>
-          sync(evt.properties.sessionID, [{ type: "session_diff", data: evt.properties.diff }]),
+          Effect.gen(function* () {
+            const diffs = evt.properties.diff
+            // Viewers have no git repo, so statistics-only payloads (the
+            // hot-path cache shape) must be enriched here, at upload time.
+            // The check is cheap; keep the git run gated on the share status.
+            if (diffs.length > 0 && diffs.every((item: { patch: string }) => item.patch === "")) {
+              const share = yield* getCached(evt.properties.sessionID)
+              if (!share) return
+              const patched = yield* summary.diff({ sessionID: evt.properties.sessionID })
+              yield* sync(evt.properties.sessionID, [
+                { type: "session_diff", data: patched.length > 0 ? patched : diffs },
+              ])
+              return
+            }
+            yield* sync(evt.properties.sessionID, [{ type: "session_diff", data: diffs }])
+          }),
         )
         yield* watch(Session.Event.Deleted, (evt) => remove(evt.properties.sessionID))
 
@@ -296,7 +313,9 @@ export const layer = Layer.effect(
     const full = Effect.fn("ShareNext.full")(function* (sessionID: SessionID) {
       log.info("full sync", { sessionID })
       const info = yield* session.get(sessionID)
-      const diffs = yield* session.diff(sessionID)
+      // summary.diff regenerates patch content on demand when the hot-path
+      // cache holds statistics only.
+      const diffs = yield* summary.diff({ sessionID })
       const messages = yield* Effect.sync(() => Array.from(MessageV2.stream(sessionID, { agentID: "*" })))
       const models = yield* Effect.forEach(
         Array.from(
@@ -400,4 +419,5 @@ export const defaultLayer = layer.pipe(
   Layer.provide(FetchHttpClient.layer),
   Layer.provide(Provider.defaultLayer),
   Layer.provide(Session.defaultLayer),
+  Layer.provide(SessionSummary.defaultLayer),
 )
