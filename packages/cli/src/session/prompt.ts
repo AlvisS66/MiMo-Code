@@ -466,6 +466,27 @@ export function sanitizeGeneratedTitle(value: string) {
   return line
 }
 
+// Recover a title from a StructuredOutput args stream that failed schema
+// validation (e.g. gateway-mangled JSON: truncated args, or internal-markup
+// leakage such as ｜DSML｜ tokens spliced into the value). Only digs the
+// candidate out — the caller still routes it through sanitizeGeneratedTitle.
+export function salvageTitleFromArgs(raw: string) {
+  // Stop at the first unescaped quote or end-of-string, so both a well-formed
+  // and a truncated value match; the latter when the stream was cut off.
+  const match = /"title"\s*:\s*"((?:[^"\\]|\\.)*)/u.exec(raw)
+  // An unterminated value corrupted by leaked internal markup ends at the
+  // "<｜" boundary — a legit title never contains that sequence.
+  const value = match?.[1]?.replace(/<\/?｜[\s\S]*$/u, "")
+  if (!value) return undefined
+  // Decode in one pass: sequential replaces would turn a literal `\n` (i.e. a
+  // title containing backslash + "n") into a newline before the `\\\\` pass runs.
+  return value.replace(/\\(u[0-9a-fA-F]{4}|.)/gsu, (_, seq: string) =>
+    seq.length === 5
+      ? String.fromCharCode(parseInt(seq.slice(1), 16))
+      : ({ n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", '"': '"', "\\": "\\", "/": "/" } as Record<string, string>)[seq] ?? seq,
+  )
+}
+
 /**
  * Absolute local path for an attachment: an explicit absolute `source.path`
  * first (TUI pastes spill to disk and carry the path there while `url` stays a
@@ -1336,10 +1357,30 @@ export const layer = Layer.effect(
           messages: [{ role: "user", content: titlePromptText(text, input.locale) }],
         }).pipe(Stream.runCollect)
         if (events.some(event => event.type === "abort" || ((event.type === "error" || event.type === "tool-error") && event.error instanceof Error && event.error.name === "AbortError"))) return yield* Effect.interrupt
-        if (events.some(event => event.type === "error" || event.type === "tool-error" || (event.type === "tool-call" && event.toolName !== "StructuredOutput"))) return undefined
+        // Salvage material, collected before schema validation discards it: the
+        // raw tool-args stream (tool-input-delta) survives mangled JSON, and the
+        // prose stream (text-delta) survives gateways that ignore tool_choice.
+        let prose = ""
+        let argsTail = ""
+        for (const event of events) {
+          if (event.type === "text-delta") prose += event.text
+          if (event.type === "tool-input-delta") argsTail += event.delta
+        }
+        const salvage = Effect.fnUntraced(function* () {
+          // Degraded model output: recover the title from the mangled args stream
+          // or the prose reply before giving up on the LLM entirely.
+          const recovered = sanitizeGeneratedTitle(salvageTitleFromArgs(argsTail) ?? prose)
+          if (!recovered) {
+            yield* elog.warn("title degraded to first-line fallback", { hasProse: prose.trim().length > 0, argsTail: argsTail.slice(0, 80) })
+            return undefined
+          }
+          yield* elog.warn("title recovered from degraded model output", { argsTail: argsTail.slice(0, 80) })
+          return { title: truncateTitle(recovered), status: "generated" as const }
+        })
+        if (events.some(event => event.type === "error" || event.type === "tool-error" || (event.type === "tool-call" && event.toolName !== "StructuredOutput"))) return yield* salvage()
         const result = candidate
         const raw = result && typeof result === "object" ? (result as Record<string, unknown>).title : undefined
-        if (typeof raw !== "string") return undefined
+        if (typeof raw !== "string") return yield* salvage()
         const title = sanitizeGeneratedTitle(raw)
         if (!title || title.startsWith("{") || title.startsWith("[") || /<\/?system-reminder>/i.test(title) || !/\p{L}/u.test(title)) return undefined
         return { title: truncateTitle(title), status: "generated" as const }
