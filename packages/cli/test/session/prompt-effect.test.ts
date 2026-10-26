@@ -11,6 +11,7 @@ import path from "path"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
 import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
+import { TuiEvent } from "../../src/cli/cmd/tui/event"
 import { Command } from "../../src/command"
 import { Config } from "../../src/config"
 import { LSP } from "../../src/lsp"
@@ -6595,3 +6596,66 @@ for (const boundary of ["snapshot", "language"] as const) {
       expect(next.parts.filter(p => p.type === "text").map(p => p.text)).toEqual(["NEXT_TURN_OK"])
     }), { git: true, config: providerCfg }), 45000)
 }
+
+it.live(
+  "publishes InstructionsLoaded once per session and not again on frozen-snapshot requeries",
+  () =>
+    withoutDynamicSystemPrompt(() =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const bus = yield* Bus.Service
+
+          yield* Effect.promise(() =>
+            Bun.write(path.join(Instance.directory, "AGENTS.md"), "INSTRUCTION_MARKER"),
+          )
+
+          // In-process we can only pin down the de-dup semantics: the event fires
+          // exactly once per session, and a later query riding the frozen-snapshot
+          // fast path must not repeat it. (The cross-process half of #2320 — the
+          // event must fire again after a process restart even though the snapshot
+          // is already persisted — needs a second process; it was verified end-to-end
+          // with two `serve` runs against a shared data home.)
+          const seen: string[][] = []
+          const firstEvent = defer<void>()
+          const off = yield* bus.subscribeCallback(TuiEvent.InstructionsLoaded, (event) => {
+            seen.push(event.properties.files)
+            if (seen.length === 1) firstEvent.resolve()
+          })
+
+          const chat = yield* sessions.create({
+            title: "Instructions dedup",
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          })
+
+          yield* llm.text("first")
+          yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "build",
+            model: ref,
+            parts: [{ type: "text", text: "first query" }],
+          })
+          yield* Effect.promise(() => firstEvent.promise)
+          expect(seen).toHaveLength(1)
+          expect(seen[0].some((file) => file.includes("AGENTS.md"))).toBe(true)
+
+          // Second query rides the frozen snapshot; the notification must not repeat.
+          yield* llm.text("second")
+          yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "build",
+            model: ref,
+            parts: [{ type: "text", text: "second query" }],
+          })
+          // Give any stray publish a moment to land before asserting absence.
+          yield* Effect.sleep("500 millis")
+          expect(seen).toHaveLength(1)
+
+          off()
+        }),
+        { git: true, config: providerCfg },
+      ),
+    ),
+  30_000,
+)
