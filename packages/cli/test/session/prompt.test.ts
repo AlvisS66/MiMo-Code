@@ -7,6 +7,7 @@ import { NamedError } from "@mimo-ai/shared/util/error"
 import { fileURLToPath, pathToFileURL } from "url"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import * as TestClock from "effect/testing/TestClock"
+import { Config } from "../../src/config"
 import { Instance } from "../../src/project/instance"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session"
@@ -17,6 +18,7 @@ import {
   isUserImageMime,
   normalizeTitleInput,
   predictContext,
+  salvageTitleFromArgs,
   sanitizeGeneratedTitle,
   titleContext,
   titleInputText,
@@ -26,7 +28,7 @@ import {
 } from "../../src/session/prompt"
 import { Log } from "../../src/util"
 import { tmpdir } from "../fixture/fixture"
-import { startScriptedLLMServer, toolCallResponse } from "../lib/scripted-llm-server"
+import { startScriptedLLMServer, textStopResponse, toolCallResponse } from "../lib/scripted-llm-server"
 
 void Log.init({ print: false })
 
@@ -98,6 +100,23 @@ describe("title helpers", () => {
     expect(sanitizeGeneratedTitle("<think>内部推理，不应成为标题</think>\n修复会话标题生成")).toBe("修复会话标题生成")
     expect(sanitizeGeneratedTitle("<think>我可以调用 <tool_call>read</tool_call>，但最终直接生成标题</think>\n重构认证流程")).toBe("重构认证流程")
     expect(sanitizeGeneratedTitle("<think>只有推理，没有最终标题</think>")).toBeUndefined()
+  })
+
+  test("salvages a title from intact and mangled tool-args streams", () => {
+    expect(salvageTitleFromArgs('{"title": "MimoCode会话命名逻辑"}')).toBe("MimoCode会话命名逻辑")
+    expect(salvageTitleFromArgs('{"title": "含\\"引号\\"的标题"}')).toBe('含"引号"的标题')
+    // Gateway-mangled stream: internal-markup leak spliced into a truncated value.
+    expect(salvageTitleFromArgs('{"title": "探寻MimoCode会话命名逻辑</｜DSML｜parameter titl')).toBe("探寻MimoCode会话命名逻辑")
+    // Truncated mid-value with no closing quote and no leak.
+    expect(salvageTitleFromArgs('{"title": "截断的标题部')).toBe("截断的标题部")
+    // A literal backslash before "n" must survive as backslash + n, not become
+    // a newline, and \uXXXX escapes decode to their code point.
+    expect(salvageTitleFromArgs('{"title": "a\\\\nb"}')).toBe("a\\nb")
+    expect(salvageTitleFromArgs('{"title": "\\u4fee\\u590d"}')).toBe("修复")
+    // Nothing trustworthy to extract.
+    expect(salvageTitleFromArgs("{}")).toBeUndefined()
+    expect(salvageTitleFromArgs('{"summary": "别的字段"}')).toBeUndefined()
+    expect(salvageTitleFromArgs("")).toBeUndefined()
   })
 })
 
@@ -394,6 +413,86 @@ describe("SessionPrompt.genTitle fallback locale", () => {
         ),
     })
   })
+})
+
+describe("SessionPrompt.genTitle salvage", () => {
+  const salvageConfig = (origin: string): Partial<Config.Info> => ({
+    enabled_providers: ["title-test"],
+    model_groups: { lite: "title-test/lite" },
+    provider: {
+      "title-test": {
+        npm: "@ai-sdk/openai-compatible",
+        env: [],
+        options: { apiKey: "test-key", baseURL: `${origin}/v1` },
+        models: {
+          lite: {
+            name: "lite",
+            tool_call: true,
+            limit: { context: 8000, output: 2000 },
+            modalities: { input: ["text"], output: ["text"] },
+          },
+        },
+      },
+    },
+  })
+
+  // Mangled args trip the LLM retry policy (2 retries with backoff), so these
+  // cases need more than the default 5s budget.
+  test("recovers a title from gateway-mangled tool args", async () => {
+    const stub = startScriptedLLMServer([
+      {
+        // Real-world wx-chatapi failure shape: internal-markup leak spliced
+        // into the tool-args stream, so schema validation rejects the call.
+        lines: toolCallResponse({
+          id: "call-mangled",
+          name: "StructuredOutput",
+          args: '{"title": "探寻MimoCode会话命名逻辑</｜DSML｜parameter titl',
+        }),
+      },
+    ])
+    try {
+      await using tmp = await tmpdir({ git: true, config: salvageConfig(stub.origin) })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const prompt = yield* SessionPrompt.Service
+              const result = yield* prompt.genTitle({
+                text: "当前源码中mimocode的会话命名逻辑是什么?",
+                model: { providerID: ProviderID.make("title-test"), modelID: ModelID.make("lite") },
+              })
+              expect(result).toEqual({ title: "探寻MimoCode会话命名逻辑", status: "generated" })
+            }),
+          ),
+      })
+    } finally {
+      await stub.stop()
+    }
+  }, 30000)
+
+  test("recovers a title from a prose reply when tool_choice is ignored", async () => {
+    const stub = startScriptedLLMServer([{ lines: textStopResponse("MimoCode会话命名逻辑探究") }])
+    try {
+      await using tmp = await tmpdir({ git: true, config: salvageConfig(stub.origin) })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const prompt = yield* SessionPrompt.Service
+              const result = yield* prompt.genTitle({
+                text: "当前源码中mimocode的会话命名逻辑是什么?",
+                model: { providerID: ProviderID.make("title-test"), modelID: ModelID.make("lite") },
+              })
+              expect(result).toEqual({ title: "MimoCode会话命名逻辑探究", status: "generated" })
+            }),
+          ),
+      })
+    } finally {
+      await stub.stop()
+    }
+  }, 30000)
 })
 
 describe("SessionPrompt prompt locale persistence", () => {
