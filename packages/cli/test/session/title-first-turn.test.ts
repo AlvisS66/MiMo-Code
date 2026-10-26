@@ -343,14 +343,24 @@ test("registered skill command titles use user arguments rather than the selecte
       expect(titles[0]).not.toContain("SKILL_BODY_NOT_A_TITLE")
       const empty = await run(Session.Service.use(svc => svc.create()))
       await run(SessionPrompt.Service.use(svc => svc.command({ sessionID: empty.id, command: "title-fixture-skill", arguments: "", model: "main/text" })))
-      expect(await run(Session.Service.use(svc => svc.get(empty.id)))).toMatchObject({ title: "Untitled", titleRevision: 1, titleSource: "fallback" })
+      // A blank-argument command must not burn the revision-0 shot on a
+      // placeholder: the command phase commits nothing, so the session stays
+      // open for a real title once the user sends an actual message.
+      expect(await run(Session.Service.use(svc => svc.get(empty.id)))).toMatchObject({ title: "Untitled", titleRevision: 0, titleSource: "fallback" })
       expect(titles).toHaveLength(1)
+      await run(SessionPrompt.Service.use(svc => svc.prompt({ sessionID: empty.id, noReply: true, model: { providerID: ProviderID.make("main"), modelID: ModelID.make("text") }, parts: [{ type: "text", text: "Why does the API return 404" }] })))
+      await until(async () => (await run(Session.Service.use(svc => svc.get(empty.id)))).titleSource === "generated")
+      expect(await run(Session.Service.use(svc => svc.get(empty.id)))).toMatchObject({ title: "Repair API 404", titleSource: "generated" })
+      expect(titles).toHaveLength(2)
       const attached = await run(Session.Service.use(svc => svc.create()))
       const attachmentPath = path.join(tmp.path, "fixture-package.dmg")
       await Bun.write(attachmentPath, Buffer.alloc(32))
       await run(SessionPrompt.Service.use(svc => svc.command({ sessionID: attached.id, command: "title-fixture-command", arguments: "", model: "main/text", parts: [{ type: "file", filename: "fixture-package.dmg", mime: "application/x-apple-diskimage", url: pathToFileURL(attachmentPath).href }] })))
+      // An attachment still supplies the fallback at the command phase: the
+      // guard only defers commands with nothing at all, so the title is the
+      // attachment name rather than the expanded command template.
       expect(await run(Session.Service.use(svc => svc.get(attached.id)))).toMatchObject({ title: "fixture-package.dmg", titleRevision: 1, titleSource: "fallback" })
-      expect(titles).toHaveLength(1)
+      expect(titles).toHaveLength(2)
       const retry = await run(Session.Service.use(svc => svc.create()))
       Database.use(db => db.run(sql`CREATE TEMP TRIGGER reject_command_title BEFORE UPDATE OF title ON session WHEN NEW.title_source = 'fallback' BEGIN SELECT RAISE(ABORT, 'command title fault'); END`))
       try {
@@ -358,19 +368,19 @@ test("registered skill command titles use user arguments rather than the selecte
         expect(await run(Session.Service.use(svc => svc.messages({ sessionID: retry.id })))).toHaveLength(0)
       } finally { Database.use(db => db.run(sql`DROP TRIGGER reject_command_title`)) }
       await run(SessionPrompt.Service.use(svc => svc.command({ sessionID: retry.id, command: "title-fixture-skill", arguments: "Original command request", model: "main/text" })))
-      await until(() => titles.length === 2)
-      expect(titles[1]).toContain("Original command request")
-      expect(titles[1]).not.toContain("/title-fixture-skill")
+      await until(() => titles.length === 3)
+      expect(titles.at(-1)).toContain("Original command request")
+      expect(titles.at(-1)).not.toContain("/title-fixture-skill")
       const normal = await run(Session.Service.use(svc => svc.create()))
       await run(SessionPrompt.Service.use(svc => svc.prompt({ sessionID: normal.id, source: "hook", noReply: true, model: { providerID: ProviderID.make("main"), modelID: ModelID.make("text") }, parts: [{ type: "text", text: "HOOK_CONTEXT_NOT_A_TITLE" }] })))
       expect(await run(Session.Service.use(svc => svc.get(normal.id)))).toMatchObject({ title: "Untitled", titleRevision: 0 })
-      expect(titles).toHaveLength(2)
+      expect(titles).toHaveLength(3)
       await run(SessionPrompt.Service.use(svc => svc.command({ sessionID: normal.id, command: "title-fixture-command", arguments: "Investigate request timing", model: "main/text", parts: [{ type: "text", text: "CONTEXT_NOT_A_TITLE", synthetic: true }] })))
-      await until(() => titles.length === 3)
-      expect(titles[2]).toContain("Investigate request timing")
-      expect(titles[2]).not.toContain("COMMAND_TEMPLATE_NOT_A_TITLE")
-      expect(titles[2]).not.toContain("CONTEXT_NOT_A_TITLE")
-      expect(titles[2]).not.toContain("HOOK_CONTEXT_NOT_A_TITLE")
+      await until(() => titles.length === 4)
+      expect(titles.at(-1)).toContain("Investigate request timing")
+      expect(titles.at(-1)).not.toContain("COMMAND_TEMPLATE_NOT_A_TITLE")
+      expect(titles.at(-1)).not.toContain("CONTEXT_NOT_A_TITLE")
+      expect(titles.at(-1)).not.toContain("HOOK_CONTEXT_NOT_A_TITLE")
       const normalMessages = await run(Session.Service.use(svc => svc.messages({ sessionID: normal.id })))
       expect(JSON.stringify(normalMessages)).toContain("COMMAND_TEMPLATE_NOT_A_TITLE")
       expect(JSON.stringify(normalMessages)).toContain("CONTEXT_NOT_A_TITLE")
@@ -382,7 +392,7 @@ test("registered skill command titles use user arguments rather than the selecte
       } finally { Database.use(db => db.run(sql`DROP TRIGGER reject_history_title`)) }
       await run(SessionPrompt.Service.use(svc => svc.command({ sessionID: history.id, command: "title-fixture-command", arguments: "Do not replace the original task", model: "main/text" })))
       expect(await run(Session.Service.use(svc => svc.get(history.id)))).toMatchObject({ title: "12345", titleRevision: 1 })
-      expect(titles).toHaveLength(3)
+      expect(titles).toHaveLength(4)
       const beforeInvalid = requests
       for (const actual of [{ agent: "missing-agent", model: "main/text" }, { agent: "build", model: "missing/model" }]) {
         const invalid = await run(Session.Service.use(svc => svc.create()))
@@ -393,7 +403,7 @@ test("registered skill command titles use user arguments rather than the selecte
         expect(await run(Session.Service.use(svc => svc.messages({ sessionID: invalid.id })))).toHaveLength(0)
         await Bun.sleep(50)
         expect(requests).toBe(beforeInvalid)
-        expect(titles).toHaveLength(3)
+        expect(titles).toHaveLength(4)
       }
     } })
   } finally { await server.stop(true) }

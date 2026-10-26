@@ -1376,8 +1376,13 @@ export const layer = Layer.effect(
     }) {
       if (input.session.parentID || input.session.titleSource !== "fallback" || input.session.titleRevision !== 0) return
       const firstUser = input.history.find(hasTitleInput)
-      if (!firstUser && input.arguments === undefined) return
       const normalized = normalizeTitleInput(firstUser?.parts ?? [{ type: "text", text: input.arguments }, ...(input.files ?? [])])
+      // Nothing to title yet: a command with no usable input must not commit a
+      // placeholder — that would burn the one revision-0 shot and lock the title
+      // forever. Attachment-only commands still commit, because their fallback is
+      // the attachment name; deferring them would let the persisted message title
+      // from the expanded command template instead.
+      if (!firstUser && !normalized.hasInput) return
       const changed = yield* sessions.setTitleIfDefault({ sessionID: input.session.id, title: normalized.fallback, expectedRevision: input.session.titleRevision, source: "fallback" })
       if (!changed) return
       const current = yield* sessions.get(input.session.id)
