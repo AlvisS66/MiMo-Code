@@ -1,17 +1,20 @@
 ---
 feature: project-config-execution
-status: in-progress
+status: delivered
 updated: 2026-10-28
 source: codex/fix-project-config-execution
+commits: ebd06ee2f..53e7f2ae5
 ---
 
 # Project configuration execution boundary
 
 ## Report
 
-**What was built** — Desktop's Node engine, including hosts with a partial Bun shim, now rejects MCP, LSP and formatter configuration outside its host sources. Ordinary project settings and Bun CLI behavior are preserved. Allowed host file decisions survive global aggregation; project entries cannot enable servers or inject command environment overrides. The updated Node engine must be integrated into the desktop client before Windows UI verification.
+**What was built** — Desktop's Node engine, including hosts with a partial Bun shim, rejects MCP, LSP and formatter configuration outside its host sources. Ordinary project settings and Bun CLI behavior are preserved. Allowed file decisions survive global aggregation; rejected project entries cannot enable servers or inject environment overrides.
 
-**Verification** — From `packages/cli`, `bun test --timeout 30000 test/config test/plugin/host-sdk.test.ts test/plugin/host-node.test.ts test/mcp/project-config-execution.test.ts` passed with 202 tests, 4 existing platform skips and 435 assertions. From the repository root, `bun run typecheck` passed across all workspaces and scripts. From `packages/cli`, `MODELS_DEV_API_JSON=./test/tool/fixtures/models-api.json bun run script/build-node.ts` succeeded. Built-engine smoke checks exercised `GET /command` and `/config` on native Node and a partial Bun shim, with initial and restored instances: host MCP connected, project markers were absent, and allowed global symlink MCP/LSP/formatter settings survived. `git diff --check` passed; scoped lint reported 0 errors and 21 existing warnings on unchanged code. Independent review approved implementation commit `6cd61b0d9` after the source aggregation finding was fixed; an additional reviewer check covered trusted and untrusted legacy TOML migration.
+Legacy TOML is read and parsed from disk on each load. Migration outside the host boundary is skipped, preserving allowed symlink sources across invalidation and restart. Model refresh candidate and commit reflect current legacy model settings and file edits without migration writes, deletion or starter writes. Windows UI verification remains required after integrating the updated Node engine into the desktop client.
+
+**Verification** — From `packages/cli`, `bun test --timeout 30000 test/config test/plugin/host-sdk.test.ts test/plugin/host-node.test.ts test/mcp/project-config-execution.test.ts` passed with 206 tests, 4 existing platform skips and 518 assertions. From the repository root, `bun run typecheck` passed across all workspaces and scripts. From `packages/cli`, `MODELS_DEV_API_JSON=./test/tool/fixtures/models-api.json bun run script/build-node.ts` succeeded. Built-engine smoke checks exercised `GET /command` and `/config` on native Node and a partial Bun shim: host MCP connected, project markers were absent, allowed symlinks survived and edited legacy TOML was reloaded after invalidation. `git diff --check` passed; scoped lint reported 0 errors and 21 existing warnings on unchanged code. The branch was rebased onto `origin/main`; merge checks passed. Independent review approved implementation commit `53e7f2ae5` with no actionable findings.
 
 ## [S1] Problem
 
@@ -43,9 +46,11 @@ HTML preview and privileged desktop bridges are the report's second vulnerabilit
 
 - [x] T1: Share the host source policy and filter executable configuration — acceptance: rejected sections cannot enter effective configuration or override allowed host entries (covers: S2.1, S2.2).
 - [x] T2: Add and run regression tests — acceptance: restricted loading never writes a project MCP marker, allowed host MCP still connects, Node shim and source boundary cases pass (depends: T1, covers: S2.3).
-- [ ] T3: Verify compatibility and independently review the diff — acceptance: relevant tests and typecheck complete; review findings are resolved (depends: T2, T4).
-- [ ] T4: Preserve legacy sources when migration would cross the host boundary — acceptance: allowed TOML symlink configuration survives source invalidation, restricted destinations receive no migration write or deletion, and allowed migrations still complete (covers: S2.4).
+- [x] T3: Verify compatibility and independently review the diff — acceptance: relevant tests and typecheck complete; review findings are resolved (depends: T2, T4).
+- [x] T4: Preserve legacy sources when migration would cross the host boundary — acceptance: allowed TOML symlink configuration survives source invalidation, restricted destinations receive no migration write or deletion, and allowed migrations still complete (covers: S2.4).
 
 ## Journey log
 
 Review caught a trust decision being applied again to an aggregated global directory, which incorrectly rejected a legitimate global symlink into the host directory. Filtering now happens at each original source load; both symlink directions have regressions. The original project configuration tests failed before the fix, and a real harmless MCP fixture confirmed root, hidden and Claude project servers connected before the policy was extended.
+
+Legacy migration review also exposed source changes after migration and stale model reads. Retaining the original source, including it in model-only reads and replacing cached imports with filesystem parsing resolves those cases; regressions cover initial load, invalidation, refresh candidate/commit and edits to an already loaded TOML file.
