@@ -1,6 +1,6 @@
 ---
 feature: project-config-execution
-status: in-progress
+status: delivered
 updated: 2026-10-28
 source: codex/fix-project-config-execution
 ---
@@ -8,6 +8,10 @@ source: codex/fix-project-config-execution
 # Project configuration execution boundary
 
 ## Report
+
+**What was built** — Desktop's Node engine, including hosts with a partial Bun shim, now rejects MCP, LSP and formatter configuration outside its host sources. Ordinary project settings and Bun CLI behavior are preserved. Allowed host file decisions survive global aggregation; project entries cannot enable servers or inject command environment overrides. The updated Node engine must be integrated into the desktop client before Windows UI verification.
+
+**Verification** — From `packages/cli`, `bun test --timeout 30000 test/config test/plugin/host-sdk.test.ts test/plugin/host-node.test.ts test/mcp/project-config-execution.test.ts` passed with 202 tests, 4 existing platform skips and 435 assertions. From the repository root, `bun run typecheck` passed across all workspaces and scripts. From `packages/cli`, `MODELS_DEV_API_JSON=./test/tool/fixtures/models-api.json bun run script/build-node.ts` succeeded. Built-engine smoke checks exercised `GET /command` and `/config` on native Node and a partial Bun shim, with initial and restored instances: host MCP connected, project markers were absent, and allowed global symlink MCP/LSP/formatter settings survived. `git diff --check` passed; scoped lint reported 0 errors and 21 existing warnings on unchanged code. Independent review approved implementation commit `6cd61b0d9` after the source aggregation finding was fixed; an additional reviewer check covered trusted and untrusted legacy TOML migration.
 
 ## [S1] Problem
 
@@ -35,6 +39,8 @@ HTML preview and privileged desktop bridges are the report's second vulnerabilit
 
 - [x] T1: Share the host source policy and filter executable configuration — acceptance: rejected sections cannot enter effective configuration or override allowed host entries (covers: S2.1, S2.2).
 - [x] T2: Add and run regression tests — acceptance: restricted loading never writes a project MCP marker, allowed host MCP still connects, Node shim and source boundary cases pass (depends: T1, covers: S2.3).
-- [ ] T3: Verify compatibility and independently review the diff — acceptance: relevant tests and typecheck complete; review findings are resolved (depends: T2).
+- [x] T3: Verify compatibility and independently review the diff — acceptance: relevant tests and typecheck complete; review findings are resolved (depends: T2).
 
 ## Journey log
+
+Review caught a trust decision being applied again to an aggregated global directory, which incorrectly rejected a legitimate global symlink into the host directory. Filtering now happens at each original source load; both symlink directions have regressions. The original project configuration tests failed before the fix, and a real harmless MCP fixture confirmed root, hidden and Claude project servers connected before the policy was extended.
