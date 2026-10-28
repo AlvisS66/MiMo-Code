@@ -1,6 +1,6 @@
 ---
 feature: project-config-execution
-status: delivered
+status: in-progress
 updated: 2026-10-28
 source: codex/fix-project-config-execution
 ---
@@ -31,6 +31,10 @@ Discard entire MCP, LSP and formatter sections from other sources while loading 
 
 Exercise actual configuration loading across root and nested JSON/JSONC files, Claude compatibility, allowed host configuration, host overrides, absent host directories and symlinks. Use a real harmless MCP subprocess that writes a temporary marker to prove restricted project loading cannot execute it, including a second instance load. Verify Node behavior with and without a partial Bun shim, and existing configuration and plugin tests.
 
+### [S2.4] Legacy migration boundary
+
+Read legacy TOML configuration using its original source decision. If the migration destination is outside allowed host sources, preserve the legacy file and skip migration writes and deletion. This keeps an allowed global symlink into the host directory usable after invalidation and restart. Continue normal migration when the destination is allowed, including ordinary Bun CLI mode. Rejected legacy executable sections remain unavailable at runtime.
+
 ## [S3] Out of Scope
 
 HTML preview and privileged desktop bridges are the report's second vulnerability. Desktop UI and Windows installer sources are not present in this repository; verification here covers the shared engine and its Node build.
@@ -39,7 +43,8 @@ HTML preview and privileged desktop bridges are the report's second vulnerabilit
 
 - [x] T1: Share the host source policy and filter executable configuration — acceptance: rejected sections cannot enter effective configuration or override allowed host entries (covers: S2.1, S2.2).
 - [x] T2: Add and run regression tests — acceptance: restricted loading never writes a project MCP marker, allowed host MCP still connects, Node shim and source boundary cases pass (depends: T1, covers: S2.3).
-- [x] T3: Verify compatibility and independently review the diff — acceptance: relevant tests and typecheck complete; review findings are resolved (depends: T2).
+- [ ] T3: Verify compatibility and independently review the diff — acceptance: relevant tests and typecheck complete; review findings are resolved (depends: T2, T4).
+- [ ] T4: Preserve legacy sources when migration would cross the host boundary — acceptance: allowed TOML symlink configuration survives source invalidation, restricted destinations receive no migration write or deletion, and allowed migrations still complete (covers: S2.4).
 
 ## Journey log
 

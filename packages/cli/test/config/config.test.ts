@@ -268,6 +268,61 @@ describe("host executable configuration policy", () => {
       Global.Path.config = previous
     }
   })
+
+  for (const scenario of [
+    { name: "restricted global symlink", restricted: true, inHost: false },
+    { name: "ordinary Bun migration", restricted: false, inHost: false },
+    { name: "restricted host migration", restricted: true, inHost: true },
+  ]) {
+    test(`legacy TOML configuration survives reload: ${scenario.name}`, async () => {
+      if (process.platform === "win32") return
+      await using tmp = await tmpdir({ git: true })
+      await using host = await tmpdir({
+        init: (dir) => Bun.write(path.join(dir, "allowed.toml"), `
+username = "testuser"
+[mcp.example]
+type = "local"
+command = ["example-server"]
+enabled = false
+[lsp.example]
+command = ["example-lsp"]
+extensions = [".example"]
+[formatter.example]
+command = ["example-format"]
+extensions = [".example"]
+`),
+      })
+      await using global = await tmpdir()
+      const directory = scenario.inHost ? host.path : global.path
+      await fs.symlink(path.join(host.path, "allowed.toml"), path.join(directory, "config"))
+      const previous = Global.Path.config
+      Global.Path.config = directory
+      try {
+        await withHost(host.path, async () => {
+          process.env.MIMOCODE_ONLY_CONFIG_DIR_PLUGINS = scenario.restricted ? "1" : "0"
+          for (let attempt = 0; attempt < 2; attempt++) {
+            await Instance.provide({
+              directory: tmp.path,
+              fn: async () => {
+                const config = await load()
+                expect(config.username).toBe("testuser")
+                expect(config.mcp).toEqual(executable.mcp)
+                expect(config.lsp).toEqual(executable.lsp)
+                expect(config.formatter).toEqual(executable.formatter)
+              },
+            })
+            await clear(true)
+          }
+          const migrated = !scenario.restricted || scenario.inHost
+          expect(await Bun.file(path.join(directory, "config")).exists()).toBe(!migrated)
+          expect(await Bun.file(path.join(directory, "config.json")).exists()).toBe(migrated)
+          expect(await Bun.file(path.join(host.path, "allowed.toml")).exists()).toBe(true)
+        })
+      } finally {
+        Global.Path.config = previous
+      }
+    })
+  }
 })
 
 async function check(map: (dir: string) => string) {

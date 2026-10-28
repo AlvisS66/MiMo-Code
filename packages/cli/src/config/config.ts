@@ -652,7 +652,11 @@ export const layer = Layer.effect(
               if (provider && model) result.model = `${provider}/${model}`
               result["$schema"] = "https://mimo.xiaomi.com/mimocode/config.json"
               result = mergeDeep(result, filterExecutableConfig(rest, legacy))
-              await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
+              const destination = path.join(Global.Path.config, "config.json")
+              // Keep the original source when migration would cross the host
+              // boundary and make allowed configuration disappear on reload.
+              if (!ConfigHost.allowsExecution(destination)) return
+              await fsNode.writeFile(destination, JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
             .catch(() => {}),
