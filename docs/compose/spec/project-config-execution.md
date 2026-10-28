@@ -2,7 +2,7 @@
 feature: project-config-execution
 status: delivered
 updated: 2026-10-28
-source: codex/fix-project-config-execution
+source: https://github.com/XiaomiMiMo/MiMo-Code/pull/2737
 commits: ebd06ee2f..53e7f2ae5
 ---
 
