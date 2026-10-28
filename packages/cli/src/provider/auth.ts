@@ -6,6 +6,7 @@ import { zod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
 import { Plugin } from "../plugin"
 import { ProviderID } from "./schema"
+import { XIAOMI_API_PROVIDER_ID, legacyXiaomiAliasTarget } from "./xiaomi-family"
 import { Array as Arr, Effect, Layer, Record, Result, Context, Schema } from "effect"
 import z from "zod"
 
@@ -95,6 +96,20 @@ export type Error =
   | InstanceType<typeof ValidationFailed>
 
 type Hook = NonNullable<Hooks["auth"]>
+
+/**
+ * Persist one provider credential (shared by mimoLogin and the OAuth callback).
+ * A token-plan write also drops the legacy same-cluster `xiaomi` alias so one
+ * credential cannot hang under two keys.
+ */
+export const saveCredential = (auth: Auth.Interface, providerID: string, info: Auth.Info) =>
+  Effect.gen(function* () {
+    const legacy = yield* auth.get(XIAOMI_API_PROVIDER_ID)
+    yield* auth.set(providerID, info)
+    if (legacy && legacyXiaomiAliasTarget(legacy) === providerID) {
+      yield* auth.remove(XIAOMI_API_PROVIDER_ID)
+    }
+  })
 
 export interface Interface {
   readonly methods: () => Effect.Effect<Methods>
@@ -205,8 +220,10 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       )
       if (!result || result.type !== "success") return yield* Effect.fail(new OauthCallbackFailed({}))
 
+      const saveProvider = ProviderID.make(result.provider ?? input.providerID)
+
       if ("key" in result) {
-        yield* auth.set(input.providerID, {
+        yield* saveCredential(auth, saveProvider, {
           type: "api",
           key: result.key,
           ...("metadata" in result && result.metadata ? { metadata: result.metadata } : {}),
@@ -214,8 +231,8 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       }
 
       if ("refresh" in result) {
-        const { type: _, provider: __, refresh, access, expires, ...extra } = result
-        yield* auth.set(input.providerID, {
+        const { type: _t, provider: _p, refresh, access, expires, ...extra } = result
+        yield* saveCredential(auth, saveProvider, {
           type: "oauth",
           access,
           refresh,

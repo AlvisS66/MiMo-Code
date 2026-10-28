@@ -1,5 +1,6 @@
 import type { AssistantMessage, Config, Message, Model, Provider } from "@mimo-ai/sdk/v2"
 import { contextWindow as overflowWindow } from "@/session/overflow"
+import { XIAOMI_CREDENTIAL_PROVIDER_IDS } from "@/provider/xiaomi-family"
 import { Locale, Token } from "@/util"
 
 type Selection = {
@@ -54,14 +55,34 @@ export function initial(
 
 const PREFERRED_DEFAULT: Selection = { providerID: "xiaomi", modelID: "mimo-v2.6-pro" }
 
+function hasCredential(provider: Provider | undefined) {
+  return Boolean(provider?.key || (provider?.options?.apiKey as string | undefined))
+}
+
+/** Post-login pick: first family provider holding credentials and models (token-plan clusters → xiaomi), pro preferred. */
+export function familyDefaultModel(list: Provider[] | undefined): Selection | undefined {
+  for (const providerID of XIAOMI_CREDENTIAL_PROVIDER_IDS) {
+    const provider = list?.find((p) => p.id === providerID)
+    const models = provider ? Object.keys(provider.models) : []
+    if (!provider || !hasCredential(provider) || models.length === 0) continue
+    const modelID = "mimo-v2.6-pro" in provider.models ? "mimo-v2.6-pro" : models[0]!
+    return { providerID, modelID }
+  }
+  return undefined
+}
+
 /**
- * When argument/recent/configured all miss: prefer the signed-in xiaomi pro
- * model (login required), else the first provider's default/first model.
+ * When argument/recent/configured all miss: prefer the model of the family
+ * provider holding credentials (token-plan cluster → xiaomi API). With no
+ * family credential, use the catalog-listed xiaomi pro model, then the first
+ * provider's default/first model.
  */
 export function fallback(
   list: Provider[] | undefined,
   providerDefault: Record<string, string> = {},
 ): Selection | undefined {
+  const keyed = familyDefaultModel(list)
+  if (keyed) return keyed
   const preferred = get(list, PREFERRED_DEFAULT.providerID, PREFERRED_DEFAULT.modelID)
   if (preferred) return PREFERRED_DEFAULT
   const provider = list?.[0]

@@ -6,6 +6,7 @@ import * as McpExa from "../mcp-exa"
 import * as MimoWebsearch from "./mimo"
 import { Auth } from "@/auth"
 import { Provider } from "@/provider"
+import { isXiaomiFamilyProvider } from "@/provider/xiaomi-family"
 import DESCRIPTION from "./websearch.txt"
 
 const WEBFETCH_FALLBACK =
@@ -62,18 +63,21 @@ export const WebSearchTool = Tool.define(
           const model = (ctx.extra as { model?: Provider.Model })?.model
           const timeout = params.timeout === undefined ? undefined : Math.min(params.timeout * 1000, MAX_TIMEOUT)
 
+          // API and token-plan credentials are stored separately, so the key must
+          // come from the model's own provider rather than a hardcoded `xiaomi`.
+          const gatewayModel = model && isXiaomiFamilyProvider(model.providerID) ? model : undefined
           const result =
-            model?.providerID === "xiaomi"
+            gatewayModel
               ? yield* Effect.catchCause(
                   Effect.gen(function* () {
-                    const info = yield* auth.get("xiaomi")
+                    const info = yield* auth.get(gatewayModel.providerID)
                     if (!info || info.type !== "api") return undefined
                     return yield* MimoWebsearch.call(
                       http,
-                      model.api.url,
+                      gatewayModel.api.url,
                       info.key,
                       params.query,
-                      model.api.id,
+                      gatewayModel.api.id,
                       timeout ?? "30 seconds",
                     )
                   }),

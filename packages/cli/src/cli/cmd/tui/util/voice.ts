@@ -4,6 +4,7 @@ import { RealtimeVAD, type VADSegment } from "./vad"
 import z from "zod"
 import VOICE_CONTROL_SYSTEM_PROMPT from "./voice-input.txt"
 import type { TextPlacement } from "./voice-edit"
+import { XIAOMI_CREDENTIAL_PROVIDER_IDS, isXiaomiFamilyProvider, xiaomiDefaultBaseUrl } from "@/provider/xiaomi-family"
 
 const log = Log.create({ service: "tui.voice" })
 
@@ -22,15 +23,33 @@ export function resolveCredentials(
   providers: Array<{ id: string; key?: string; options: Record<string, unknown>; models: Record<string, { api: { url: string } }> }>,
   config: VoiceProviderConfig,
 ): VoiceCredentials | VoiceCredentialError {
-  const provider = providers.find((p) => p.id === config.providerID)
-  if (!provider) return { error: "not_found", providerID: config.providerID, model: config.model }
-  const apiKey = provider.key || (provider.options?.apiKey as string | undefined)
-  if (!apiKey) return { error: "no_key", providerID: config.providerID, model: config.model }
-  const baseUrl = (provider.options?.baseURL as string)
-    || Object.values(provider.models)[0]?.api?.url
-    || (config.providerID === "xiaomi" ? "https://api.xiaomimimo.com/v1" : undefined)
-  if (!baseUrl) return { error: "no_url", providerID: config.providerID, model: config.model }
-  return { apiKey, baseUrl }
+  type Provider = (typeof providers)[number]
+  const find = (id: string) => providers.find((p) => p.id === id)
+  const keyOf = (p: Provider) => p.key || (p.options?.apiKey as string | undefined)
+  const urlOf = (p: Provider) =>
+    (p.options?.baseURL as string) || Object.values(p.models)[0]?.api?.url || xiaomiDefaultBaseUrl(p.id)
+
+  const configured = find(config.providerID)
+  const configuredKey = configured ? keyOf(configured) : undefined
+  if (configured && configuredKey) {
+    const baseUrl = urlOf(configured)
+    if (!baseUrl) return { error: "no_url", providerID: config.providerID, model: config.model }
+    return { apiKey: configuredKey, baseUrl }
+  }
+  // A keyless family config falls back along token-plan clusters → xiaomi (desktop order).
+  if (isXiaomiFamilyProvider(config.providerID)) {
+    for (const id of XIAOMI_CREDENTIAL_PROVIDER_IDS) {
+      const provider = find(id)
+      const apiKey = provider ? keyOf(provider) : undefined
+      if (!provider || !apiKey) continue
+      const baseUrl = urlOf(provider)
+      if (!baseUrl) return { error: "no_url", providerID: id, model: config.model }
+      return { apiKey, baseUrl }
+    }
+  }
+  return configured
+    ? { error: "no_key", providerID: config.providerID, model: config.model }
+    : { error: "not_found", providerID: config.providerID, model: config.model }
 }
 
 export function resolveVoiceConfig(voiceConfig?: { asr_model?: string; control_model?: string }): {

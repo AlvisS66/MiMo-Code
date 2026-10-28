@@ -16,6 +16,7 @@ import {
 } from "solid-js"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { Flag } from "@/flag/flag"
+import { removeXiaomiFamilyCredentials } from "@/provider/xiaomi-family"
 import { isSystemSession } from "@/session/auto-dream"
 import semver from "semver"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
@@ -725,7 +726,8 @@ export function App(props: { onSnapshot?: () => Promise<string[]> }) {
         name: "logout",
       },
       onSelect: async () => {
-        await sdk.client.auth.remove({ providerID: "xiaomi" })
+        // Logout must clear every family key; token-plan entries survive a `xiaomi`-only removal.
+        await removeXiaomiFamilyCredentials((providerID) => sdk.client.auth.remove({ providerID }))
         await sdk.client.instance.dispose()
         await sync.bootstrap()
         toast.show({ message: t("tui.command.logout.toast"), variant: "info" })

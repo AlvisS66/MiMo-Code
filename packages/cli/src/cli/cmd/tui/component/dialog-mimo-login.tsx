@@ -10,6 +10,7 @@ import { DialogSelect } from "@tui/ui/dialog-select"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { useToast } from "../ui/toast"
 import * as Clipboard from "@tui/util/clipboard"
+import { familyDefaultModel } from "@tui/util/model"
 import { useRenderer } from "@opentui/solid"
 import os from "os"
 import path from "path"
@@ -192,11 +193,9 @@ function MimoOAuthFlow(props: { url: string; instructions: string }) {
   async function onLoginSuccess() {
     await sdk.client.instance.dispose()
     await sync.bootstrap()
-    const xiaomi = sync.data.provider.find((p) => p.id === "xiaomi")
-    const defaultModel =
-      xiaomi && "mimo-v2.6-pro" in xiaomi.models ? "mimo-v2.6-pro" : xiaomi ? Object.keys(xiaomi.models)[0] : undefined
-    if (defaultModel) {
-      local.model.set({ providerID: "xiaomi", modelID: defaultModel }, { recent: true })
+    const picked = familyDefaultModel(sync.data.provider)
+    if (picked) {
+      local.model.set(picked, { recent: true })
     }
     dialog.clear()
   }
