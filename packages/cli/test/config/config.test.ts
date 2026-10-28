@@ -84,6 +84,165 @@ async function writeClaudeConfig(file: string, config: object) {
   await Filesystem.write(file, JSON.stringify(config))
 }
 
+describe("host executable configuration policy", () => {
+  const keys = [
+    "MIMOCODE_ONLY_CONFIG_DIR_PLUGINS",
+    "MIMOCODE_CONFIG_DIR",
+    "MIMOCODE_CONFIG_CONTENT",
+    "MIMOCODE_CONFIG_DEFAULTS",
+  ] as const
+
+  async function withHost<T>(dir: string | undefined, fn: () => Promise<T>) {
+    const previous = keys.map((key) => process.env[key])
+    process.env.MIMOCODE_ONLY_CONFIG_DIR_PLUGINS = "1"
+    if (dir) process.env.MIMOCODE_CONFIG_DIR = dir
+    else delete process.env.MIMOCODE_CONFIG_DIR
+    delete process.env.MIMOCODE_CONFIG_CONTENT
+    delete process.env.MIMOCODE_CONFIG_DEFAULTS
+    try {
+      return await fn()
+    } finally {
+      for (const [index, key] of keys.entries()) {
+        const value = previous[index]
+        if (value == null) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }
+
+  const executable: Config.Info = {
+    mcp: { example: { type: "local", command: ["example-server"], enabled: false } },
+    lsp: { example: { command: ["example-lsp"], extensions: [".example"] } },
+    formatter: { example: { command: ["example-format"], extensions: [".example"] } },
+  }
+
+  for (const filename of ["mimocode.json", "mimocode.jsonc", ".mimocode/mimocode.json", ".mimocode/mimocode.jsonc"]) {
+    test(`ignores executable sections from project ${filename} and preserves ordinary settings`, async () => {
+      await using tmp = await tmpdir({
+        git: true,
+        init: (dir) => writeConfig(dir, { ...executable, model: "test/model" }, filename),
+      })
+      await withHost(undefined, () =>
+        Instance.provide({
+          directory: tmp.path,
+          fn: async () => {
+            const config = await load()
+            expect(config.model).toBe("test/model")
+            expect(config.mcp?.example).toBeUndefined()
+            expect(config.mcp_origins?.example).toBeUndefined()
+            expect(config.lsp).toBeUndefined()
+            expect(config.formatter).toBeUndefined()
+          },
+        }),
+      )
+    })
+  }
+
+  test("preserves host executable configuration and excludes global and Claude MCP sources", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await using host = await tmpdir({ init: (dir) => writeConfig(dir, executable) })
+    await using global = await tmpdir({
+      init: (dir) =>
+        writeConfig(dir, {
+          mcp: { global: { type: "local", command: ["example-global"] } },
+        }),
+    })
+    const previous = Global.Path.config
+    Global.Path.config = global.path
+    try {
+      await writeClaudeConfig(path.join(Global.Path.home, ".claude.json"), {
+        mcpServers: { home: { command: "example-home" } },
+      })
+      await writeClaudeConfig(path.join(tmp.path, ".claude.json"), {
+        mcpServers: { project: { command: "example-project" } },
+      })
+      await writeConfig(tmp.path, {
+        mcp: { example: { enabled: true } },
+        lsp: { example: { command: ["example-override"], extensions: [".example"], env: { EXAMPLE: "untrusted" } } },
+        formatter: { example: { environment: { EXAMPLE: "untrusted" } } },
+      })
+      await withHost(host.path, () =>
+        Instance.provide({
+          directory: tmp.path,
+          fn: async () => {
+            const config = await load()
+            expect(config.mcp).toEqual(executable.mcp)
+            expect(config.lsp).toEqual(executable.lsp)
+            expect(config.formatter).toEqual(executable.formatter)
+            expect(config.mcp_origins).toEqual({
+              example: { type: "opencode", source: path.join(host.path, "mimocode.json") },
+            })
+          },
+        }),
+      )
+    } finally {
+      Global.Path.config = previous
+    }
+  })
+
+  test("allows executable settings injected by the host", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: { mcp: { example: { enabled: true }, defaults: { enabled: true } } },
+    })
+    await withHost(undefined, async () => {
+      process.env.MIMOCODE_CONFIG_CONTENT = JSON.stringify(executable)
+      process.env.MIMOCODE_CONFIG_DEFAULTS = JSON.stringify({
+        mcp: { defaults: { type: "local", command: ["example-default"], enabled: false } },
+      })
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const config = await load()
+          expect(config.mcp?.example).toEqual(executable.mcp?.example)
+          expect(config.mcp?.defaults).toEqual({ type: "local", command: ["example-default"], enabled: false })
+          expect(config.lsp).toEqual(executable.lsp)
+          expect(config.formatter).toEqual(executable.formatter)
+        },
+      })
+    })
+  })
+
+  test("resolves host directory symlinks but rejects escaped and adjacent config paths", async () => {
+    if (process.platform === "win32") return
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        const host = path.join(dir, "host")
+        await fs.mkdir(host)
+        await writeConfig(dir, executable, "host-other/mimocode.json")
+        await fs.symlink(path.join(dir, "host-other", "mimocode.json"), path.join(host, "mimocode.json"))
+        await fs.symlink(host, path.join(dir, "host-link"))
+        await writeConfig(
+          host,
+          { mcp: { trusted: { type: "local", command: ["example-host"], enabled: false } } },
+          "mimocode.jsonc",
+        )
+        return host
+      },
+    })
+    // Global files are merged before instance loading; retain their individual
+    // source checks so a symlink cannot inherit its containing directory's trust.
+    const previous = Global.Path.config
+    Global.Path.config = tmp.extra
+    try {
+      await withHost(path.join(tmp.path, "host-link"), () =>
+        Instance.provide({
+          directory: path.join(tmp.path, "host-other"),
+          fn: async () => {
+            const config = await load()
+            expect(config.mcp).toEqual({ trusted: { type: "local", command: ["example-host"], enabled: false } })
+            expect(config.lsp).toBeUndefined()
+            expect(config.formatter).toBeUndefined()
+          },
+        }),
+      )
+    } finally {
+      Global.Path.config = previous
+    }
+  })
+})
+
 async function check(map: (dir: string) => string) {
   if (process.platform !== "win32") return
   await using globalTmp = await tmpdir()

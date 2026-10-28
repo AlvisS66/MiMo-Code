@@ -27,6 +27,7 @@ import { zod, ZodOverride } from "@/util/effect-zod"
 import { ConfigAgent } from "./agent"
 import { ConfigCommand } from "./command"
 import { ConfigFormatter } from "./formatter"
+import { ConfigHost } from "./host"
 import { MIMOCODE_GITIGNORE_ENTRIES } from "./gitignore"
 import { ConfigLayout } from "./layout"
 import { ConfigLSP } from "./lsp"
@@ -45,6 +46,17 @@ import { ConfigSkills } from "./skills"
 import { ConfigVariable } from "./variable"
 
 const log = Log.create({ service: "config" })
+
+function filterExecutableConfig(config: Info, source: string): Info {
+  if (ConfigHost.allowsExecution(source)) return config
+  // Drop whole sections before merging: partial entries can enable a disabled
+  // server or inject environment/initialization into a trusted command.
+  const { mcp, lsp, formatter, ...safe } = config
+  if (mcp || lsp != null || formatter != null) {
+    log.warn("ignoring executable configuration outside host config sources", { source })
+  }
+  return safe
+}
 
 // Custom merge function that concatenates array fields instead of replacing them
 function mergeConfigConcatArrays(target: Info, source: Info): Info {
@@ -619,7 +631,7 @@ export const layer = Layer.effect(
       log.info("loading", { path: filepath })
       const text = yield* readConfigFile(filepath)
       if (!text) return {} as Info
-      return yield* loadConfig(text, { path: filepath, modelsOnly })
+      return filterExecutableConfig(yield* loadConfig(text, { path: filepath, modelsOnly }), filepath)
     })
 
     const loadGlobal = Effect.fnUntraced(function* (modelsOnly = false) {
@@ -639,7 +651,7 @@ export const layer = Layer.effect(
               const { provider, model, ...rest } = mod.default
               if (provider && model) result.model = `${provider}/${model}`
               result["$schema"] = "https://mimo.xiaomi.com/mimocode/config.json"
-              result = mergeDeep(result, rest)
+              result = mergeDeep(result, filterExecutableConfig(rest, legacy))
               await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
@@ -738,6 +750,7 @@ export const layer = Layer.effect(
         }
 
         const merge = (source: string, next: Info, kind?: ConfigPlugin.Scope) => {
+          next = filterExecutableConfig(next, source)
           result = mergeConfigConcatArrays(result, next)
           mergeMcpOrigins(source, next, "opencode")
           return modelsOnly ? Effect.void : mergePluginOrigins(source, next.plugin, kind)
@@ -757,6 +770,7 @@ export const layer = Layer.effect(
         })
 
         const mergeClaudeMcp = Effect.fnUntraced(function* (source: string) {
+          if (!ConfigHost.allowsExecution(source)) return
           const data = yield* readClaudeConfig(source)
           if (!isRecord(data)) return
           if (!isRecord(data.mcpServers)) return
@@ -923,10 +937,13 @@ export const layer = Layer.effect(
         // macOS managed preferences (.mobileconfig deployed via MDM) override everything
         const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
         if (managed) {
-          const next = yield* loadConfig(managed.text, {
-            dir: path.dirname(managed.source),
-            source: managed.source,
-          })
+          const next = filterExecutableConfig(
+            yield* loadConfig(managed.text, {
+              dir: path.dirname(managed.source),
+              source: managed.source,
+            }),
+            managed.source,
+          )
           result = mergeConfigConcatArrays(result, next)
           mergeMcpOrigins(managed.source, next, "opencode")
         }
