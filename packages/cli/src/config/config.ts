@@ -642,7 +642,6 @@ export const layer = Layer.effect(
         mergeDeep(yield* loadFile(path.join(Global.Path.config, "mimocode.jsonc"), modelsOnly)),
       )
 
-      if (modelsOnly) return result
       const legacy = path.join(Global.Path.config, "config")
       if (existsSync(legacy)) {
         yield* Effect.promise(() =>
@@ -655,13 +654,15 @@ export const layer = Layer.effect(
               const destination = path.join(Global.Path.config, "config.json")
               // Keep the original source when migration would cross the host
               // boundary and make allowed configuration disappear on reload.
-              if (!ConfigHost.allowsExecution(destination)) return
+              if (modelsOnly || !ConfigHost.allowsExecution(destination)) return
               await fsNode.writeFile(destination, JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
             .catch(() => {}),
         )
       }
+
+      if (modelsOnly) return result
 
       // Seed a starter config when no global config file exists yet
       const globalConfigFile = path.join(Global.Path.config, "mimocode.jsonc")

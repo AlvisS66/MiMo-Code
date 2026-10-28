@@ -278,8 +278,15 @@ describe("host executable configuration policy", () => {
       if (process.platform === "win32") return
       await using tmp = await tmpdir({ git: true })
       await using host = await tmpdir({
-        init: (dir) => Bun.write(path.join(dir, "allowed.toml"), `
+        init: (dir) =>
+          Bun.write(
+            path.join(dir, "allowed.toml"),
+            `
 username = "testuser"
+provider = "test"
+model = "model"
+small_model = "test/lite"
+disabled_providers = ["test-disabled"]
 [mcp.example]
 type = "local"
 command = ["example-server"]
@@ -290,7 +297,8 @@ extensions = [".example"]
 [formatter.example]
 command = ["example-format"]
 extensions = [".example"]
-`),
+`,
+          ),
       })
       await using global = await tmpdir()
       const directory = scenario.inHost ? host.path : global.path
@@ -304,8 +312,22 @@ extensions = [".example"]
             await Instance.provide({
               directory: tmp.path,
               fn: async () => {
-                const config = await load()
+                const config = await Config.Service.use((svc) =>
+                  Effect.gen(function* () {
+                    const current = yield* svc.get()
+                    expect(current.model).toBe("test/model")
+                    const refresh = yield* svc.prepareModelRefresh()
+                    expect(refresh?.config.model).toBe("test/model")
+                    expect(refresh?.config.small_model).toBe("test/lite")
+                    expect(refresh?.config.disabled_providers).toEqual(["test-disabled"])
+                    refresh?.commit()
+                    return yield* svc.get()
+                  }),
+                ).pipe(Effect.scoped, Effect.provide(layer), Effect.runPromise)
                 expect(config.username).toBe("testuser")
+                expect(config.model).toBe("test/model")
+                expect(config.small_model).toBe("test/lite")
+                expect(config.disabled_providers).toEqual(["test-disabled"])
                 expect(config.mcp).toEqual(executable.mcp)
                 expect(config.lsp).toEqual(executable.lsp)
                 expect(config.formatter).toEqual(executable.formatter)
@@ -323,6 +345,41 @@ extensions = [".example"]
       }
     })
   }
+
+  test("legacy model refresh reads allowed settings without migration writes", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await using global = await tmpdir()
+    const previous = Global.Path.config
+    Global.Path.config = global.path
+    try {
+      await withHost(global.path, () =>
+        Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            Config.Service.use((svc) =>
+              Effect.gen(function* () {
+                yield* svc.get()
+                const legacy = path.join(global.path, "config")
+                const starter = path.join(global.path, "mimocode.jsonc")
+                const before = yield* Effect.promise(() => Bun.file(starter).text())
+                yield* Effect.promise(() => Bun.write(legacy, 'provider = "test"\nmodel = "model"\n'))
+                const refresh = yield* svc.prepareModelRefresh()
+                expect(refresh?.config.model).toBe("test/model")
+                refresh?.commit()
+                expect((yield* svc.get()).model).toBe("test/model")
+                expect(yield* Effect.promise(() => Bun.file(legacy).exists())).toBe(true)
+                expect(yield* Effect.promise(() => Bun.file(path.join(global.path, "config.json")).exists())).toBe(
+                  false,
+                )
+                expect(yield* Effect.promise(() => Bun.file(starter).text())).toBe(before)
+              }),
+            ).pipe(Effect.scoped, Effect.provide(layer), Effect.runPromise),
+        }),
+      )
+    } finally {
+      Global.Path.config = previous
+    }
+  })
 })
 
 async function check(map: (dir: string) => string) {

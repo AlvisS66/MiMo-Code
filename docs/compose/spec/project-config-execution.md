@@ -33,7 +33,7 @@ Exercise actual configuration loading across root and nested JSON/JSONC files, C
 
 ### [S2.4] Legacy migration boundary
 
-Read legacy TOML configuration using its original source decision. If the migration destination is outside allowed host sources, preserve the legacy file and skip migration writes and deletion. This keeps an allowed global symlink into the host directory usable after invalidation and restart. Continue normal migration when the destination is allowed, including ordinary Bun CLI mode. Rejected legacy executable sections remain unavailable at runtime.
+Read legacy TOML configuration using its original source decision. If the migration destination is outside allowed host sources, preserve the legacy file and skip migration writes and deletion. This keeps an allowed global symlink into the host directory usable after invalidation and restart. Model-only reads also load and normalize legacy model settings, without migration writes, deletion or starter configuration writes. Continue normal migration when the destination is allowed, including ordinary Bun CLI mode. Rejected legacy executable sections remain unavailable at runtime.
 
 ## [S3] Out of Scope
 
