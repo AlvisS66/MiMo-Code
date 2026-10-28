@@ -367,6 +367,14 @@ extensions = [".example"]
                 expect(refresh?.config.model).toBe("test/model")
                 refresh?.commit()
                 expect((yield* svc.get()).model).toBe("test/model")
+                yield* Effect.promise(() =>
+                  Bun.write(legacy, 'provider = "test"\nmodel = "updated"\nsmall_model = "test/lite-updated"\n'),
+                )
+                const updated = yield* svc.prepareModelRefresh()
+                expect(updated?.config.model).toBe("test/updated")
+                expect(updated?.config.small_model).toBe("test/lite-updated")
+                updated?.commit()
+                expect((yield* svc.get()).model).toBe("test/updated")
                 expect(yield* Effect.promise(() => Bun.file(legacy).exists())).toBe(true)
                 expect(yield* Effect.promise(() => Bun.file(path.join(global.path, "config.json")).exists())).toBe(
                   false,

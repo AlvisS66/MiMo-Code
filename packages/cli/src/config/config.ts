@@ -1,11 +1,10 @@
 import { Log } from "../util"
 import path from "path"
-import { pathToFileURL } from "url"
 import os from "os"
 import z from "zod"
 import { clone, mergeDeep, pipe } from "remeda"
 import { Global } from "../global"
-import fsNode from "fs/promises"
+import { NodePath } from "@effect/platform-node"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import { Flag } from "../flag/flag"
 import { Auth } from "../auth"
@@ -20,7 +19,8 @@ import { isRecord } from "@/util/record"
 import type { ConsoleState } from "./console-state"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { InstanceState } from "@/effect"
-import { Context, Duration, Effect, Layer, Option, Schema } from "effect"
+import { Context, Duration, Effect, FileSystem, Layer, Option, Schema } from "effect"
+import * as Primitive from "effect/unstable/cli/Primitive"
 import { EffectFlock } from "@mimo-ai/shared/util/effect-flock"
 import { InstanceRef } from "@/effect/instance-ref"
 import { zod, ZodOverride } from "@/util/effect-zod"
@@ -644,22 +644,32 @@ export const layer = Layer.effect(
 
       const legacy = path.join(Global.Path.config, "config")
       if (existsSync(legacy)) {
-        yield* Effect.promise(() =>
-          import(pathToFileURL(legacy).href, { with: { type: "toml" } })
-            .then(async (mod) => {
-              const { provider, model, ...rest } = mod.default
-              if (provider && model) result.model = `${provider}/${model}`
-              result["$schema"] = "https://mimo.xiaomi.com/mimocode/config.json"
-              result = mergeDeep(result, filterExecutableConfig(rest, legacy))
-              const destination = path.join(Global.Path.config, "config.json")
-              // Keep the original source when migration would cross the host
-              // boundary and make allowed configuration disappear on reload.
-              if (modelsOnly || !ConfigHost.allowsExecution(destination)) return
-              await fsNode.writeFile(destination, JSON.stringify(result, null, 2))
-              await fsNode.unlink(legacy)
-            })
-            .catch(() => {}),
-        )
+        yield* Effect.gen(function* () {
+          // Imports cache TOML modules; retained legacy files must be read again
+          // so model refreshes see edits to the original source.
+          const parsed = yield* Primitive.fileParse({ format: "toml" }).parse(legacy).pipe(
+            Effect.provideService(FileSystem.FileSystem, fs),
+            Effect.provide(NodePath.layer),
+          )
+          if (!isRecord(parsed)) return
+          const { provider, model, ...rest } = parsed
+          const normalized = {
+            ...rest,
+            ...(typeof provider === "string" && typeof model === "string" ? { model: `${provider}/${model}` } : {}),
+          }
+          const next = yield* Effect.try({
+            try: () => ConfigParse.schema(Info, normalizeLoadedConfig(normalized, legacy), legacy),
+            catch: (error) => error,
+          })
+          result = mergeDeep(result, filterExecutableConfig(next, legacy))
+          result.$schema = "https://mimo.xiaomi.com/mimocode/config.json"
+          const destination = path.join(Global.Path.config, "config.json")
+          // Keep the original source when migration would cross the host
+          // boundary and make allowed configuration disappear on reload.
+          if (modelsOnly || !ConfigHost.allowsExecution(destination)) return
+          yield* fs.writeFileString(destination, JSON.stringify(result, null, 2))
+          yield* fs.remove(legacy)
+        }).pipe(Effect.catch(() => Effect.void))
       }
 
       if (modelsOnly) return result
