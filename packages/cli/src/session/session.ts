@@ -214,8 +214,18 @@ export type GlobalInfo = z.output<typeof GlobalInfo>
 
 export const ManualTitle = z.string().trim().min(1).transform(value => Array.from(value).slice(0, 80).join(""))
 
+// Host-supplied ids also name the session's memory directory, so they must match the
+// engine's own payload (26 base62 characters) rather than only the `ses` prefix.
+const SUPPLIED_SESSION_ID = /^ses_[0-9A-Za-z]{26}$/
+
 export const CreateInput = z
   .object({
+    // The bound stays on the input side of the pipe: a `.refine` on SessionID.zod is lost to OpenAPI.
+    id: z
+      .string()
+      .regex(SUPPLIED_SESSION_ID, "Session id must be `ses_` followed by 26 base62 characters")
+      .pipe(SessionID.zod)
+      .optional(),
     parentID: SessionID.zod.optional(),
     contextFrom: SessionID.zod.optional(),
     contextWatermark: MessageID.zod.optional(),
@@ -460,6 +470,7 @@ export class BusyError extends Error {
 
 export interface Interface {
   readonly create: (input?: {
+    id?: SessionID
     parentID?: SessionID
     contextFrom?: SessionID
     contextWatermark?: MessageID
@@ -563,6 +574,12 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       prompt?: PromptConfig
     }) {
       const ctx = yield* InstanceState.context
+      // Rows are inserted without a conflict clause; fail with the id rather than a
+      // raw primary-key error from the projection.
+      if (input.id) {
+        const taken = yield* db((d) => d.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.id!)).get())
+        if (taken) throw new Error(`Session ${input.id} already exists`)
+      }
       const result: Info = {
         id: SessionID.descending(input.id),
         slug: Slug.create(),
@@ -768,6 +785,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
     })
 
     const create = Effect.fn("Session.create")(function* (input?: {
+      id?: SessionID
       parentID?: SessionID
       contextFrom?: SessionID
       contextWatermark?: MessageID
@@ -783,6 +801,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       const directory = input?.directory ?? (yield* InstanceState.directory)
       const workspace = yield* InstanceState.workspaceID
       return yield* createNext({
+        id: input?.id,
         parentID: input?.parentID,
         contextFrom: input?.contextFrom,
         contextWatermark: input?.contextWatermark,
