@@ -241,6 +241,33 @@ describe("host executable configuration policy", () => {
       Global.Path.config = previous
     }
   })
+
+  test("preserves trusted file sources when global config symlinks into the host directory", async () => {
+    if (process.platform === "win32") return
+    await using tmp = await tmpdir({ git: true, config: { model: "test/model" } })
+    await using host = await tmpdir({ init: (dir) => writeConfig(dir, executable, "allowed.json") })
+    await using global = await tmpdir({
+      init: (dir) => fs.symlink(path.join(host.path, "allowed.json"), path.join(dir, "mimocode.json")),
+    })
+    const previous = Global.Path.config
+    Global.Path.config = global.path
+    try {
+      await withHost(host.path, () =>
+        Instance.provide({
+          directory: tmp.path,
+          fn: async () => {
+            const config = await load()
+            expect(config.model).toBe("test/model")
+            expect(config.mcp).toEqual(executable.mcp)
+            expect(config.lsp).toEqual(executable.lsp)
+            expect(config.formatter).toEqual(executable.formatter)
+          },
+        }),
+      )
+    } finally {
+      Global.Path.config = previous
+    }
+  })
 })
 
 async function check(map: (dir: string) => string) {

@@ -21,7 +21,7 @@ Reuse the existing plugin and hook policy: Node, including a partial Bun shim, a
 
 ### [S2.2] Filter before merging
 
-Discard entire MCP, LSP and formatter sections from other sources before configuration merging, including enabled toggles, environment and initialization overrides. Preserve ordinary project settings. Apply the same source check to Claude MCP compatibility and managed configuration merges. Rejected entries must neither execute nor replace allowed entries or their provenance. This policy is evaluated on every project instance load, including restored projects.
+Discard entire MCP, LSP and formatter sections from other sources while loading each source, before configuration merging, including enabled toggles, environment and initialization overrides. Preserve ordinary project settings. Apply the same source check to Claude MCP compatibility and managed configuration. Preserve individual file decisions through global aggregation: a global symlink resolving to an allowed host file stays allowed, while a host symlink escaping to a project stays rejected. Rejected entries must neither execute nor replace allowed entries or their provenance. This policy is evaluated on every project instance load, including restored projects.
 
 ### [S2.3] Verification
 

@@ -610,7 +610,7 @@ export const layer = Layer.effect(
       )
       const parsed = ConfigParse.jsonc(expanded, source)
       const data = ConfigParse.schema(Info, normalizeLoadedConfig(parsed, source), source)
-      if (!("path" in options) || options.modelsOnly) return data
+      if (!("path" in options) || options.modelsOnly) return filterExecutableConfig(data, source)
 
       yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
       if (!data.$schema || data.$schema === "https://opencode.ai/config.json") {
@@ -624,14 +624,14 @@ export const layer = Layer.effect(
           yield* fs.writeFileString(options.path, updated).pipe(Effect.catch(() => Effect.void))
         }
       }
-      return data
+      return filterExecutableConfig(data, source)
     })
 
     const loadFile = Effect.fnUntraced(function* (filepath: string, modelsOnly = false) {
       log.info("loading", { path: filepath })
       const text = yield* readConfigFile(filepath)
       if (!text) return {} as Info
-      return filterExecutableConfig(yield* loadConfig(text, { path: filepath, modelsOnly }), filepath)
+      return yield* loadConfig(text, { path: filepath, modelsOnly })
     })
 
     const loadGlobal = Effect.fnUntraced(function* (modelsOnly = false) {
@@ -750,7 +750,6 @@ export const layer = Layer.effect(
         }
 
         const merge = (source: string, next: Info, kind?: ConfigPlugin.Scope) => {
-          next = filterExecutableConfig(next, source)
           result = mergeConfigConcatArrays(result, next)
           mergeMcpOrigins(source, next, "opencode")
           return modelsOnly ? Effect.void : mergePluginOrigins(source, next.plugin, kind)
@@ -937,13 +936,10 @@ export const layer = Layer.effect(
         // macOS managed preferences (.mobileconfig deployed via MDM) override everything
         const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
         if (managed) {
-          const next = filterExecutableConfig(
-            yield* loadConfig(managed.text, {
-              dir: path.dirname(managed.source),
-              source: managed.source,
-            }),
-            managed.source,
-          )
+          const next = yield* loadConfig(managed.text, {
+            dir: path.dirname(managed.source),
+            source: managed.source,
+          })
           result = mergeConfigConcatArrays(result, next)
           mergeMcpOrigins(managed.source, next, "opencode")
         }
