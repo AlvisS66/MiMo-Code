@@ -114,6 +114,36 @@ no longer inherit the legacy code page. Note it is a system-wide Beta toggle and
 some older non-Unicode programs to display incorrectly, so treat it as a workaround.
 </details>
 
+<details>
+<summary><strong>How to set up web search</strong></summary>
+
+To let the agent search the web, either set `MIMOCODE_ENABLE_EXA=1` to enable the built-in `websearch` and `codesearch` tools (backed by Exa; for higher rate limits set `EXA_API_KEY`, created at https://dashboard.exa.ai/api-keys), or add a search MCP server under `mcp` in your config. Keys can come from environment variables through `{env:VAR}`:
+
+```jsonc
+{
+  "mcp": {
+    // Exa (key optional: create one at https://dashboard.exa.ai/api-keys and append ?exaApiKey=<key> to the URL)
+    "exa": { "type": "remote", "url": "https://mcp.exa.ai/mcp" },
+    // Tavily (API key from https://app.tavily.com)
+    "tavily": {
+      "type": "remote",
+      "url": "https://mcp.tavily.com/mcp/",
+      "headers": { "Authorization": "Bearer {env:TAVILY_API_KEY}" }
+    },
+    // Volcengine Doubao Search (needs uv with Python 3.12/3.13;
+    // key from https://console.volcengine.com/search-infinity/api-key)
+    "doubao-search": {
+      "type": "local",
+      "command": ["uvx", "--from", "mcp-server-askecho-search-infinity>=0.2.0", "mcp-server-askecho-search-infinity"],
+      "environment": { "ASK_ECHO_SEARCH_INFINITY_API_KEY": "{env:ASK_ECHO_SEARCH_INFINITY_API_KEY}" }
+    }
+  }
+}
+```
+
+Run `mimo mcp` to check that the server connects.
+</details>
+
 ---
 
 ## MiMo Ecosystem

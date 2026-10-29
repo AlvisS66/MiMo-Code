@@ -147,7 +147,10 @@ const searchPrompt = (line) =>
   "Overall question: \"" + TOPIC + "\"\n\n" +
   "Your line: **" + line.topic + "**" + (line.why ? " — " + line.why : "") + "\n" +
   "Suggested query: `" + line.query + "`\n\n" +
-  "Run `websearch` (refine the query if you can do better) and hand back the 4-6 most useful results.\n" +
+  "Search the web for your line (refine the query if you can do better) and hand back the 4-6 most useful results.\n" +
+  "Use the `websearch` tool or a configured search MCP tool. If neither is available, `webfetch` primary sources you can name " +
+  "directly (official sites, documentation, papers) or public APIs such as arXiv and GitHub search; do not scrape search-engine " +
+  "result pages. If that finds nothing, return an empty hits list.\n" +
   "Judge usefulness against the OVERALL question, not just your query. Drop content farms and SEO spam.\n" +
   "Give each result a one-line note on why it matters.\n\nReturn structured output only."
 

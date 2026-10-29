@@ -28,7 +28,6 @@ import { type ToolContext as PluginToolContext, type ToolDefinition } from "@mim
 import z from "zod"
 import { Plugin } from "../plugin"
 import { Provider } from "../provider"
-import { isXiaomiFamilyProvider } from "../provider/xiaomi-family"
 import { Worktree } from "../worktree"
 import { Git } from "../git"
 import { ProviderID, type ModelID } from "../provider/schema"
@@ -345,16 +344,7 @@ export const layer = Layer.effect(
       const useGPTTools = usesGPTToolset(input.modelID, input.harness, input.apiModelID, input.family)
       let filtered = (yield* all()).filter((tool) => {
         if (tool.id === ToolScriptTool.id) return useGPTTools || Flag.MIMOCODE_ENABLE_EXEC_TOOL
-        if (tool.id === CodeSearchTool.id || tool.id === WebSearchTool.id) {
-          if (tool.id === WebSearchTool.id) {
-            return (
-              input.providerID === ProviderID.opencode ||
-              isXiaomiFamilyProvider(input.providerID) ||
-              Flag.MIMOCODE_ENABLE_EXA
-            )
-          }
-          return input.providerID === ProviderID.opencode || Flag.MIMOCODE_ENABLE_EXA
-        }
+        if (tool.id === CodeSearchTool.id || tool.id === WebSearchTool.id) return Flag.MIMOCODE_ENABLE_EXA
 
         if (tool.id === ApplyPatchTool.id || tool.id === ViewImageTool.id) return useGPTTools
         if (

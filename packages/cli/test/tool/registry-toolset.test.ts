@@ -268,7 +268,7 @@ describe("ToolRegistry.tools: toolset selection", () => {
     ),
   )
 
-  it.live("exposes websearch for xiaomi family providers only", () =>
+  it.live("offers Exa search tools to no provider unless explicitly enabled", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const reg = yield* ToolRegistry.Service
@@ -278,12 +278,11 @@ describe("ToolRegistry.tools: toolset selection", () => {
           reg
             .tools({ providerID: ProviderID.make(providerID), modelID: ModelID.make("mimo-v2.6"), agent: build })
             .pipe(Effect.map((tools) => tools.map((tool) => tool.id)))
-        const family = yield* ids("xiaomi-token-plan-cn")
-        const api = yield* ids("xiaomi")
-        const other = yield* ids("openai")
-        expect(family).toContain("websearch")
-        expect(api).toContain("websearch")
-        expect(other).not.toContain("websearch")
+        for (const providerID of ["xiaomi", "xiaomi-token-plan-cn", "openai", "opencode"]) {
+          const tools = yield* ids(providerID)
+          expect(tools).not.toContain("websearch")
+          expect(tools).not.toContain("codesearch")
+        }
       }),
     ),
   )

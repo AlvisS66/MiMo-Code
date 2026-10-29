@@ -109,6 +109,36 @@ mimo attach http://127.0.0.1:4096
 注意这是系统级 Beta 开关，可能导致部分老的非 Unicode 程序显示异常，建议作为临时方案。
 </details>
 
+<details>
+<summary><strong>如何配置联网搜索</strong></summary>
+
+如需让 Agent 联网搜索，可以设置 `MIMOCODE_ENABLE_EXA=1` 启用内置的 `websearch` 和 `codesearch` 工具（基于 Exa；如需更高频率上限，在 https://dashboard.exa.ai/api-keys 创建 Key 并设置 `EXA_API_KEY`），或在配置的 `mcp` 下添加一个搜索 MCP 服务。密钥可通过 `{env:VAR}` 从环境变量读取：
+
+```jsonc
+{
+  "mcp": {
+    // Exa（Key 可选：在 https://dashboard.exa.ai/api-keys 创建后，在 URL 末尾加 ?exaApiKey=<key>）
+    "exa": { "type": "remote", "url": "https://mcp.exa.ai/mcp" },
+    // Tavily（在 https://app.tavily.com 获取 API Key）
+    "tavily": {
+      "type": "remote",
+      "url": "https://mcp.tavily.com/mcp/",
+      "headers": { "Authorization": "Bearer {env:TAVILY_API_KEY}" }
+    },
+    // 火山引擎豆包搜索（需要 uv 与 Python 3.12/3.13；
+    // 在 https://console.volcengine.com/search-infinity/api-key 获取 Key）
+    "doubao-search": {
+      "type": "local",
+      "command": ["uvx", "--from", "mcp-server-askecho-search-infinity>=0.2.0", "mcp-server-askecho-search-infinity"],
+      "environment": { "ASK_ECHO_SEARCH_INFINITY_API_KEY": "{env:ASK_ECHO_SEARCH_INFINITY_API_KEY}" }
+    }
+  }
+}
+```
+
+运行 `mimo mcp` 检查服务是否连接成功。
+</details>
+
 ---
 
 ## MiMo 生态
