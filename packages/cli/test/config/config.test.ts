@@ -1,5 +1,5 @@
 import { test, expect, describe, mock, afterEach, beforeEach, spyOn } from "bun:test"
-import { Effect, Layer, Option } from "effect"
+import { Effect, Exit, Layer, Option } from "effect"
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
 import { Config, ConfigManaged } from "../../src/config"
 import { ConfigParse } from "../../src/config/parse"
@@ -115,6 +115,92 @@ describe("host executable configuration policy", () => {
     lsp: { example: { command: ["example-lsp"], extensions: [".example"] } },
     formatter: { example: { command: ["example-format"], extensions: [".example"] } },
   }
+
+  for (const restricted of [true, false]) {
+    it.live(
+      `model updates preserve stored execution settings with host restrictions ${restricted ? "enabled" : "disabled"}`,
+      () =>
+        provideTmpdirInstance(
+          (dir) =>
+            Effect.gen(function* () {
+              const file = path.join(dir, "config.json")
+              const original = {
+                ...executable,
+                $schema: "https://mimo.xiaomi.com/mimocode/config.json",
+                model: "test/original",
+              }
+              yield* Effect.promise(() => writeConfig(dir, original, "config.json"))
+              const previous = keys.map((key) => [key, process.env[key]] as const)
+              const previousConfigDir = Global.Path.config
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  Global.Path.config = previousConfigDir
+                  for (const [key, value] of previous) {
+                    if (value == null) delete process.env[key]
+                    else process.env[key] = value
+                  }
+                }),
+              )
+              Global.Path.config = dir
+              process.env.MIMOCODE_ONLY_CONFIG_DIR_PLUGINS = restricted ? "1" : "0"
+              delete process.env.MIMOCODE_CONFIG_DIR
+              delete process.env.MIMOCODE_CONFIG_CONTENT
+              delete process.env.MIMOCODE_CONFIG_DEFAULTS
+
+              const svc = yield* Config.Service
+              const effective = yield* svc.get()
+              expect(effective.model).toBe("test/original")
+              expect(effective.mcp?.example).toEqual(restricted ? undefined : executable.mcp?.example)
+              expect(effective.lsp).toEqual(restricted ? undefined : executable.lsp)
+              expect(effective.formatter).toEqual(restricted ? undefined : executable.formatter)
+
+              for (const model of ["test/updated", "test/updated-again"]) {
+                yield* svc.update({ model })
+                expect(yield* Effect.promise(() => Bun.file(file).json())).toEqual({ ...original, model })
+              }
+            }),
+          { git: true },
+        ),
+    )
+  }
+
+  it.live("model updates preserve literal references and disabled execution settings", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const file = path.join(dir, "config.json")
+        const original = {
+          mcp: {
+            example: {
+              type: "local",
+              command: ["{env:EXAMPLE_COMMAND}"],
+              environment: { EXAMPLE: "{file:./missing-token}" },
+            },
+          },
+          lsp: false,
+          formatter: false,
+          plugin: ["./example-plugin.ts"],
+        }
+        yield* Effect.promise(() => writeConfig(dir, original, "config.json"))
+        const svc = yield* Config.Service
+        yield* svc.update({ model: "test/updated" })
+        expect(yield* Effect.promise(() => Bun.file(file).json())).toEqual({ ...original, model: "test/updated" })
+      }),
+    ),
+  )
+
+  it.live("model updates leave invalid stored configuration untouched", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const file = path.join(dir, "config.json")
+        const svc = yield* Config.Service
+        for (const before of ['{"model":', '{"model": 123}']) {
+          yield* Effect.promise(() => Filesystem.write(file, before))
+          expect(Exit.isFailure(yield* svc.update({ model: "test/updated" }).pipe(Effect.exit))).toBe(true)
+          expect(yield* Effect.promise(() => Filesystem.readText(file))).toBe(before)
+        }
+      }),
+    ),
+  )
 
   for (const filename of ["mimocode.json", "mimocode.jsonc", ".mimocode/mimocode.json", ".mimocode/mimocode.jsonc"]) {
     test(`ignores executable sections from project ${filename} and preserves ordinary settings`, async () => {

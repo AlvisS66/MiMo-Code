@@ -1067,7 +1067,12 @@ export const layer = Layer.effect(
     const update = Effect.fn("Config.update")(function* (config: Info) {
       const dir = yield* InstanceState.directory
       const file = path.join(dir, "config.json")
-      const existing = yield* loadFile(file)
+      // Persist the stored configuration, preserving filtered sections and literal references.
+      const before = (yield* readConfigFile(file)) || "{}"
+      const existing = yield* Effect.try({
+        try: () => ConfigParse.schema(Info, normalizeLoadedConfig(ConfigParse.jsonc(before, file), file), file),
+        catch: (error) => error,
+      }).pipe(Effect.orDie)
       yield* fs
         .writeFileString(file, JSON.stringify(mergeDeep(writable(existing), writable(config)), null, 2))
         .pipe(Effect.orDie)
