@@ -22,7 +22,7 @@ import { SessionStatus } from "./status"
 import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Log, Token } from "../util"
-import { Effect, Layer, Deferred, Context, Scope, Semaphore } from "effect"
+import { Effect, Layer, Deferred, Context, Scope } from "effect"
 import { makeRuntime } from "@/effect/run-service"
 import type { ActorPromptOps } from "@/tool/actor"
 import type { ProviderID, ModelID } from "../provider/schema"
@@ -703,7 +703,6 @@ export const layer: Layer.Layer<
 
     // Plain Map in the layer closure — same approach as compaction.ts
     const writers = new Map<SessionID, WriterState>()
-    const writerStarts = new Map<SessionID, Semaphore.Semaphore>()
 
     const tryStartCheckpointWriter: (
       input: TryStartCheckpointWriterInput,
@@ -1182,11 +1181,6 @@ export const layer: Layer.Layer<
       )
 
       return "started" as const
-    }, (effect, input) => {
-      // Keep admission serialized until the spawned actor is registered.
-      const lock = writerStarts.get(input.sessionID) ?? Semaphore.makeUnsafe(1)
-      writerStarts.set(input.sessionID, lock)
-      return lock.withPermits(1)(effect)
     })
 
     const waitForWriterSettlement = Effect.fn("SessionCheckpoint.waitForWriterSettlement")(function* (
