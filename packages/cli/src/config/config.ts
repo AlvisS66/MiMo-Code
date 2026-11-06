@@ -267,6 +267,10 @@ const InfoSchema = Schema.Struct({
         description:
           "Whether to fork the parent agent's message prefix into the writer session for prefix-cache reuse. Requires provider cache-breakpoint support. Default: true.",
       }),
+      tail_budget: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Token cap for the rebuild-tail appendix serialized into the fork-mode checkpoint writer prompt (the boundary tail is excluded from the forked message prefix to keep it byte-equal to the parent request; the appendix is how the writer still reads it). Oldest entries are dropped first when the cap is hit. Default: 25000. Set 0 to disable the appendix (alignment-only, writer leans on the boundary digest). Full-fidelity tail-as-messages stays available via checkpoint.fork: false.",
+      }),
       push_caps: Schema.optional(
         Schema.Struct({
           tasks_ledger: Schema.optional(PositiveInt).annotate({

@@ -15,6 +15,7 @@ import { Config } from "@/config"
 import { Instance } from "@/project/instance"
 import { Agent } from "@/agent/agent"
 import { MessageV2 } from "./message-v2"
+import * as RequestChain from "./request-chain"
 import { Plugin } from "@/plugin"
 import { SystemPrompt } from "./system"
 import { Permission } from "@/permission"
@@ -692,6 +693,52 @@ const live: Layer.Layer<
           {},
         )
         .pipe(Effect.ignore)
+
+      // Prefix-cache forensics: fingerprint the request just before the SDK call
+      // and compare its head against what this session sent before (the parent's
+      // requests, for a forked subagent). `shared` is how many leading messages
+      // hash identically, so a first-round cache miss can be read as "identical
+      // prefix, provider did not reuse it" versus "diverges at message N".
+      // Skipped for ephemeral/small calls (title generation) so the ring only
+      // holds real conversation requests. Debug level: this is a diagnostic to
+      // switch on, and it stringifies the whole context (~tens of ms).
+      if (!input.ephemeral && !input.small) {
+        const chain = yield* Effect.try({
+          try: () =>
+            RequestChain.record({
+              // Root session: a writer runs in a child session
+              // (`checkpoint.ts` creates it with `parentID`), so keying by the
+              // request's own session would never see the parent's chains.
+              sessionID: input.parentSessionID ?? input.sessionID,
+              agentID: input.agentID ?? input.agent.name,
+              model: `${input.model.providerID}/${input.model.id}`,
+              system: providerSystem,
+              // Tool block sits at the front of the provider cache and its
+              // descriptions are agent-parameterised, so names alone are not a
+              // prefix identity.
+              tools: activeTools.map((name) => {
+                const item = tools[name]
+                return `${name}\u0000${item?.description ?? ""}\u0000${JSON.stringify(item?.inputSchema ?? null)}`
+              }),
+              messages,
+            }),
+          catch: () => undefined,
+        }).pipe(
+          // `Effect.try` only maps the thrown value into the error channel; the
+          // effect still fails. A diagnostic must never fail the request, so the
+          // failure is swallowed here rather than left to the caller.
+          Effect.catch(() => Effect.succeed(undefined)),
+        )
+        if (chain)
+          l.debug("request chain", {
+            agentID: input.agentID ?? input.agent.name,
+            requestHash: chain.requestHash,
+            systemHash: chain.systemHash,
+            toolsHash: chain.toolsHash,
+            msgCount: chain.msgCount,
+            matches: chain.matches,
+          })
+      }
 
       const execution = yield* HostModelTransport.ExecutionScope
       const executionScope = !input.ephemeral && (!input.agentID || input.agentID === "main")

@@ -784,6 +784,12 @@ export const layer = Layer.effect(
           additions,
           prebuiltSystem: frozen?.system,
           prompt: capturePrompt,
+          // Collapse a legacy boundary's tail into its activity log only when
+          // the caller asks (fork:true, to stay byte-equal with both runLoop
+          // call sites). fork:false leaves the flag unset — normalized to false
+          // here — so the writer keeps its full-fidelity tail messages
+          // (historical behavior).
+          collapseCheckpointTail: input.collapseCheckpointTail === true,
         }).pipe(
           Effect.provideService(LLM.Service, llm),
           Effect.provideService(ToolRegistry.Service, registry),

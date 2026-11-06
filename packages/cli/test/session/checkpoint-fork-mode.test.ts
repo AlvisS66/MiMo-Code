@@ -35,7 +35,7 @@ const ref = {
 // settle: when true, actor.spawn settles outcome with success immediately so the
 // settle watcher fires deterministically (mirrors checkpoint-child-session.test.ts).
 const spawnLog: { count: number; lastInput?: { sessionID: string; mode: string; forkContext?: unknown } } = { count: 0 }
-const captureLog: { calls: Array<{ sessionID: string; agentName: string; msgsLen: number; firstMsgRole?: string; firstMsgID?: string }> } = { calls: [] }
+const captureLog: { calls: Array<{ sessionID: string; agentName: string; msgsLen: number; firstMsgRole?: string; firstMsgID?: string; collapseCheckpointTail?: boolean }> } = { calls: [] }
 
 // Actor stub: records spawn input (incl. forkContext) and settles outcome with
 // success immediately so the writer doesn't hang the test.
@@ -85,6 +85,7 @@ function installRecordingCapture() {
         msgsLen: input.msgs.length,
         firstMsgRole: first?.role,
         firstMsgID: first?.id,
+        collapseCheckpointTail: input.collapseCheckpointTail,
       })
       return {
         system: ["sys-canned"],
@@ -246,6 +247,12 @@ describe("checkpoint writer forkContext shape per mode", () => {
           const call = captureLog.calls[0]
           // T6: agentName must be the parent's (from watermark message), NOT "checkpoint-writer".
           expect(call.agentName).toBe("build")
+          // fork:true passes the flag explicitly: the captured prefix must stay
+          // byte-equal with the parent runLoop (which collapses legacy tails).
+          // The e2e rebuild-tail suite only produces modern boundaries, where
+          // the flag is a no-op — this is the only guard against regressing to
+          // an unconditional value either way.
+          expect(call.collapseCheckpointTail).toBe(true)
           // msgs slice is [u1, a1, u2] — the watermark u2 is at idx 2, so slice
           // length = watermarkIdx + 1 = 3.
           expect(call.msgsLen).toBe(3)
@@ -315,6 +322,10 @@ describe("checkpoint writer forkContext shape per mode", () => {
           const call = captureLog.calls[0]
           // T4: agentName must be "checkpoint-writer" (no-fork path uses writer's own agent).
           expect(call.agentName).toBe("checkpoint-writer")
+          // fork:false omits the flag: the writer keeps its full-fidelity tail
+          // messages (collapsing a legacy boundary's tail here would silently
+          // drop tail tool outputs with no appendix to recover them).
+          expect(call.collapseCheckpointTail).toBeUndefined()
           // alignment: rawDeltaStart=2 walks back past tool_result-only u2 to u1 (idx 0).
           // delta length = watermarkIdx + 1 - 0 = 3.
           expect(call.msgsLen).toBe(3)
