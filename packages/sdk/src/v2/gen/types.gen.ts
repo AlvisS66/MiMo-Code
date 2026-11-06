@@ -2863,6 +2863,10 @@ export type Config = {
      */
     fork?: boolean
     /**
+     * Token cap for the rebuild-tail appendix serialized into the fork-mode checkpoint writer prompt (the boundary tail is excluded from the forked message prefix to keep it byte-equal to the parent request; the appendix is how the writer still reads it). Oldest entries are dropped first when the cap is hit. Default: 25000. Set 0 to disable the appendix (alignment-only, writer leans on the boundary digest). Full-fidelity tail-as-messages stays available via checkpoint.fork: false.
+     */
+    tail_budget?: number
+    /**
      * Per-section token caps for rebuild context (renderRebuildContext). Each section is loaded up to its cap so the rebuild stays within a predictable budget.
      */
     push_caps?: {

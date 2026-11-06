@@ -124,6 +124,7 @@ The trigger is the model's prompt capacity (`limit.input` when the provider publ
 | `checkpoint.thresholds` | Context-fill triggers, e.g. `["40%","60%","80%"]` |
 | `checkpoint.reserved` | Token buffer for checkpoint ops (default 20000) |
 | `checkpoint.fork` | Fork parent prefix into writer session for cache reuse (default true) |
+| `checkpoint.tail_budget` | Token budget for the verbatim tail appendix the forked writer reads (default 25000; 0 disables it) |
 | `checkpoint.push_caps.*` | Per-section token caps for rebuild context (tasks_ledger, focus_task, checkpoint, memory, notes, global, recent_user, …) |
 | `checkpoint.task_archive_days` | Days before done/abandoned tasks filtered out (default 7) |
 | `checkpoint.memory_search_score_floor` | BM25 relative floor for memory search (default 0.15) |

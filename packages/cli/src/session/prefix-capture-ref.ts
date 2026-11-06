@@ -43,6 +43,10 @@ export type PrefixCaptureFn = (input: {
   // `MessageV2.WithParts[]` but importing that type here would
   // re-introduce the SessionCheckpoint↔ToolRegistry cycle.
   msgs: unknown[]
+  // Only fork:true passes true: the captured prefix must stay byte-equal to
+  // the parent request, which collapses legacy-boundary tails. fork:false
+  // omits it so the writer keeps its historical full-fidelity tail messages.
+  collapseCheckpointTail?: boolean
 }) => Effect.Effect<PrefixCaptureResult, never>
 
 export const prefixCaptureRef: { current: PrefixCaptureFn | undefined } = { current: undefined }

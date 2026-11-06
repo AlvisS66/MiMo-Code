@@ -20,13 +20,16 @@ import type { PromptConfig } from "./session"
  *   - parent runLoop, to construct its own request
  *   - tryStartCheckpointWriter, to capture a frozen ForkContext at spawn time
  *
- * Both call sites must use this same function — the byte-equal invariant
- * across parent and fork is a structural consequence, not a separate assertion.
- * Exception: the parent runLoop sets `collapseCheckpointTail: true` so the model
- * sees a rebuild-tail activity log instead of hollow tool pairs; the checkpoint
- * writer leaves it off so it still writes from full-fidelity history. When a
- * prior checkpoint exists, parent/writer inheritedMessages therefore diverge by
- * design (checkpoint quality beats prefix-cache parity on the rebuild path).
+ * Both call sites must use this same function. The parent runLoop passes
+ * `collapseCheckpointTail: true` unconditionally; the fork-capture closure
+ * passes the flag normalized to a boolean (`input.collapseCheckpointTail ===
+ * true`), which is only true for fork:true — the byte-equal invariant across
+ * parent and fork is a structural consequence, not a separate assertion. The fork:true
+ * writer captures the parent window verbatim (ended inputs restored, no tail
+ * splice); the rebuild tail reaches the writer as a prompt appendix instead
+ * of messages. The fork:false writer omits the flag, so a legacy boundary's
+ * tail stays verbatim in its delta view (the parent collapses it; the two
+ * diverge here by design — fork:false has no cache expectations).
  *
  * Slicing (e.g. for fork capture at a watermark) is a caller concern; callers
  * pass the already-sliced msgs. ForkContext.watermarkMsgID is a boundary marker
@@ -48,9 +51,12 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
   prompt?: PromptConfig
   /**
    * Collapse the tail of a legacy rebuild boundary (one stamped before the
-   * tail it digests) into its activity log. Enable for the main-agent runLoop;
-   * leave off for checkpoint-writer fork capture so the writer still sees
-   * full-fidelity recent history.
+   * tail it digests) into its activity log. The main-agent runLoop passes
+   * true unconditionally; the fork-capture closure normalizes the flag to a
+   * boolean, true only for fork:true, so the captured prefix renders
+   * identically to the parent request (the fork:true writer reads the tail
+   * from the prompt appendix, not from messages). fork:false gets false —
+   * equivalent to omitting the flag — keeping full-fidelity tail messages.
    */
   collapseCheckpointTail?: boolean
 }) {

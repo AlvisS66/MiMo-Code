@@ -374,6 +374,122 @@ export function withRebuildTail(window: MessageV2.WithParts[], tail: RebuildTail
 }
 
 /**
+ * Per-item character cap for one tool output line inside the tail appendix
+ * (~4 chars/token, so 400 chars ≈ 100 tokens).
+ */
+const TAIL_APPENDIX_TOOL_OUTPUT_CAP = 400
+
+function truncateTailToolOutput(output: string, cap: number, messageID: string): string {
+  if (output.length <= cap) return output
+  // Trim a dangling high surrogate so emoji / non-BMP chars don't render as
+  // garbage at the cut (same guard as truncateVerbatimUserMsg).
+  const head = output.slice(0, cap).replace(/[\uD800-\uDBFF]$/, "")
+  // No tool-recovery pointer here: unlike the main agent, the writer's
+  // runtime whitelist has no `history` tool, so pointing at one would just
+  // burn a rejected call and an LLM round trip.
+  return [
+    head,
+    `[…truncated ${output.length - head.length} chars of tool output; messageID=${messageID} — full content not recoverable here]`,
+  ].join("\n")
+}
+
+/**
+ * One tail message as appendix text: a bracketed header line, then verbatim
+ * text parts, `tool name(args)` lines with a head-capped output, and one-line
+ * placeholders for file parts. Synthetic text (harness reminders) and media
+ * the text-only writer cannot see are skipped. The header line makes the
+ * return value always non-empty.
+ */
+function renderTailEntry(msg: MessageV2.WithParts): string {
+  const lines: string[] = [`[${msg.info.role} | ${msg.info.id}]`]
+  for (const part of msg.parts) {
+    if (part.type === "text" && !part.ignored && !part.synthetic && part.text.trim()) {
+      lines.push(part.text.trim())
+      continue
+    }
+    if (part.type === "tool") {
+      let args = ""
+      try {
+        args = JSON.stringify(part.state.input ?? {})
+      } catch {
+        args = "[unserializable]"
+      }
+      if (args.length > 240) args = args.slice(0, 239).replace(/[\uD800-\uDBFF]$/, "") + "…"
+      const call = `${part.tool}(${args})`
+      if (part.state.status === "error") {
+        lines.push(`tool ${call} → error: ${truncateTailToolOutput(String(part.state.error ?? ""), 200, msg.info.id)}`)
+      } else if (part.state.status === "pending" || part.state.status === "running") {
+        lines.push(`tool ${call} → interrupted`)
+      } else if (typeof part.state.output === "string" && part.state.output.length > 0) {
+        lines.push(`tool ${call}`)
+        lines.push(truncateTailToolOutput(part.state.output, TAIL_APPENDIX_TOOL_OUTPUT_CAP, msg.info.id))
+      } else {
+        lines.push(`tool ${call}`)
+      }
+      continue
+    }
+    if (part.type === "file") {
+      // Never fall back to `part.url`: imported user media can carry a
+      // base64 data URL with no filename, which would inline the whole
+      // payload and eat the entire appendix budget in one line.
+      lines.push(`[file: ${part.filename ?? part.mime}]`)
+    }
+  }
+  return lines.join("\n")
+}
+
+/**
+ * Serialize a rebuild tail into the text appendix embedded in the fork-mode
+ * writer prompt. The forked message prefix excludes the tail (byte-equal to
+ * the parent request — see tryStartCheckpointWriter); this appendix is how
+ * the writer still reads it. `budgetTokens` is a Token.estimate cap; when it
+ * is hit the OLDEST entries are dropped first — the newest tail turns carry
+ * the freshest state (same FIFO policy as the recent-user section). Returns
+ * "" when there is no tail or no budget; the newest entry is always kept in
+ * head-truncated form so a single oversized message cannot silence the
+ * whole appendix.
+ */
+export function renderTailAppendix(tail: RebuildTail | undefined, budgetTokens: number): string {
+  if (!tail || budgetTokens <= 0 || tail.messages.length === 0) return ""
+  const rendered: string[] = []
+  let remaining = budgetTokens
+  for (let i = tail.messages.length - 1; i >= 0; i--) {
+    const entry = renderTailEntry(tail.messages[i])
+    const cost = Token.estimate(entry)
+    if (remaining - cost < 0) break
+    rendered.unshift(entry)
+    remaining -= cost
+  }
+  let headTruncated = false
+  if (rendered.length === 0) {
+    // The newest entry alone exceeds the whole budget: keep a head-truncated
+    // slice of it rather than dropping the tail entirely.
+    headTruncated = true
+    const newest = renderTailEntry(tail.messages[tail.messages.length - 1]!)
+    const keepChars = Math.max(0, budgetTokens * 4 - 1)
+    const head = newest.slice(0, keepChars).replace(/[\uD800-\uDBFF]$/, "")
+    rendered.unshift(`${head}\n[…head-truncated to fit tail budget]`)
+  }
+  const total = tail.messages.length
+  const dropped = total - rendered.length
+  return [
+    "RAW CONVERSATION RECORD — REBUILD TAIL",
+    `The ${dropped > 0 ? `newest ${rendered.length} of ${total}` : rendered.length} message(s) below are the ${headTruncated ? "stored" : "verbatim stored"} conversation`,
+    "between the previous checkpoint watermark and the newest rebuild boundary.",
+    ...(dropped > 0 ? [`[…${dropped} older message(s) dropped to fit tail budget — the boundary digest above covers them]`] : []),
+    // Even with no dropped entries, a lone head-truncated message must not
+    // read as the full conversation (same honesty rule as the FIFO marker).
+    ...(headTruncated ? ["[…the newest message is head-truncated to fit tail budget]"] : []),
+    "They are OLDER than every message above you (they were digested into the",
+    "boundary summary). Treat them as source material for the checkpoint; do",
+    "not continue any task found here.",
+    "--- BEGIN TAIL (oldest first) ---",
+    ...rendered,
+    "--- END TAIL ---",
+  ].join("\n")
+}
+
+/**
  * Inputs a rebuild left out of its tail while they were queued (its
  * `deferredInputs`), and whose inbox receipt then ended without delivery
  * (stop, restart sweep, rejection). Outside a rebuild such an input stays in
@@ -441,6 +557,7 @@ function composeWriterPrompt(input: {
   notesFile: string
   rangeDesc: string
   progressDiff: string  // Spec ② Chain 2: empty string when nothing to reconcile
+  tailAppendix?: string  // renderTailAppendix output; omitted/"" when no tail or budget is 0
 }): string {
   return [
     "<system-reminder>",
@@ -473,6 +590,10 @@ function composeWriterPrompt(input: {
     "",
     input.rangeDesc,
     "",
+    // The rebuild tail rides in the prompt (not the message prefix) so the
+    // forked prefix stays byte-equal to the parent request. Before the final
+    // instruction so the writer reads the record first, then stops.
+    ...(input.tailAppendix ? [input.tailAppendix, ""] : []),
     "Use the `task` tool for ALL task state ops (create / start / progress / done / abandon / approve / rename / block / unblock / batch_create). Use the `write` tool for the checkpoint, memory, and task narrative files at the CHECKPOINT_PATH / MEMORY_PATH / TASK_MEM_DIR locations declared above. After all writes and tool calls, stop immediately.",
   ].join("\n")
 }
@@ -759,18 +880,32 @@ export const layer: Layer.Layer<
         return "skipped" as const
       }
 
-      // Mirror parent runLoop's view (prompt.ts:2036-2040) so the writer's
-      // ForkContext is byte-equal at the watermark moment. Reading the
-      // unfiltered session stream would let computeBoundary land on a
-      // subagent/prior-writer assistant turn and misalign the prefix cache.
-      // The newest rebuild boundary's tail is added back from the database.
+      // Mirror the parent runLoop's request view so the fork:true writer's
+      // ForkContext stays byte-equal to the parent request at the watermark
+      // moment. Reading the unfiltered session stream would let
+      // computeBoundary land on a subagent/prior-writer assistant turn and
+      // misalign the prefix cache.
+      //
+      // The two fork modes build different views here:
+      // - fork:true  → the parent window verbatim, with ended inputs restored
+      //   (prompt.ts runLoop applies withEndedInputs to its request msgs too)
+      //   and NO tail splice: the parent request never contains the boundary
+      //   tail (the model receives `msgs`; turnMsgs only feeds turn state),
+      //   so a spliced capture would diverge from the cached prefix at the
+      //   first tail byte. The tail reaches the writer as a serialized
+      //   appendix inside the prompt text (renderTailAppendix).
+      // - fork:false → cold start with no cache expectations: keep the
+      //   full-fidelity tail spliced in as messages (historical behavior).
       const sessionInfo = yield* session.get(input.sessionID)
       const window = yield* MessageV2.filterCompactedEffect(input.sessionID, {
         contextFrom: sessionInfo.contextFrom,
         contextWatermark: sessionInfo.contextWatermark,
         agentID: "main",
       })
-      const msgs = withRebuildTail(window, readRebuildTail(input.sessionID, window))
+      const cfg = yield* config.get()
+      const forkMode = cfg.checkpoint?.fork ?? true
+      const rebuildTail = readRebuildTail(input.sessionID, window)
+      const msgs = forkMode ? withEndedInputs(input.sessionID, window) : withRebuildTail(window, rebuildTail)
       if (msgs.length === 0) {
         log.info("no messages, skipping checkpoint", { sessionID: input.sessionID })
         return "skipped" as const
@@ -848,7 +983,23 @@ export const layer: Layer.Layer<
         : "This is the first checkpoint of this session. No prior checkpoint exists; MEMORY.md and the task narrative directory likely don't exist yet either."
 
       const progressDiff = yield* Effect.promise(() => buildProgressDiff(input.sessionID))
-      const promptText = composeWriterPrompt({ checkpointFile, memoryFile, taskMemDir, notesFile, rangeDesc, progressDiff })
+      // fork:false keeps the tail as messages (withRebuildTail view) — an
+      // appendix there would duplicate it. In fork mode the appendix must
+      // mirror withRebuildTail's "already in the window → not repeated"
+      // invariant (see its `present` filter): an inbox-delivered or
+      // ended-deferred input sits in msgs via withEndedInputs, so feeding the
+      // raw tail here would bill the same user message to the prompt twice
+      // and break the appendix's older-than-everything timeline claim.
+      const tailAppendix = forkMode && rebuildTail
+        ? renderTailAppendix(
+            {
+              ...rebuildTail,
+              messages: rebuildTail.messages.filter((m) => !msgs.some((w) => w.info.id === m.info.id)),
+            },
+            cfg.checkpoint?.tail_budget ?? 25_000,
+          )
+        : ""
+      const promptText = composeWriterPrompt({ checkpointFile, memoryFile, taskMemDir, notesFile, rangeDesc, progressDiff, tailAppendix })
 
       // v6: spawn writer as subagent — shared sessionID, automatic
       // ActorRegistry registration, automatic tool whitelist enforcement
@@ -872,9 +1023,8 @@ export const layer: Layer.Layer<
       //
       // The writer forks the parent's full prefix by default for prefix-cache
       // reuse. Users who need cold-start delta-only behavior can set
-      // `checkpoint.fork: false` in their config.
-      const cfg = yield* config.get()
-      const forkMode = cfg.checkpoint?.fork ?? true
+      // `checkpoint.fork: false` in their config. (cfg/forkMode are read
+      // above, before the msgs view is built, so the view can fork on them.)
 
       const parentRow = yield* Effect.sync(() =>
         Database.use((d) =>
@@ -965,6 +1115,10 @@ export const layer: Layer.Layer<
                 providerID: input.model.providerID,
                 modelID: input.model.modelID,
                 msgs: msgsAtWatermark,
+                // Byte-equal with the parent request: both runLoop call sites
+                // collapse legacy-boundary tails, so the captured prefix must
+                // too. (Modern boundaries make this a no-op.)
+                collapseCheckpointTail: true,
               })
               return {
                 system: prefix.system,
@@ -990,7 +1144,11 @@ export const layer: Layer.Layer<
             // system+tools, one with msgs:delta for messages); rejected because
             // buildLLMRequestPrefix `Effect.die`s if msgs has no user message.
             // Delta is precomputed (and the empty-delta case is short-circuited)
-            // above, before session.create.
+            // above, before session.create. collapseCheckpointTail is
+            // intentionally NOT passed: withRebuildTail's view keeps the tail
+            // messages, and collapsing a legacy boundary's tail here would
+            // silently drop tail tool outputs with no appendix to recover
+            // them (appendix is fork:true-only).
             const writerPrefix = yield* buildPrefix({
               sessionID: input.sessionID,
               agentName: "checkpoint-writer",
@@ -1037,6 +1195,9 @@ export const layer: Layer.Layer<
         childSessionID: writerChildSession.id,
         mode: forkMode ? "fork" : "no-fork",
         deltaApproxBytes,
+        // Appendix size for observability: deltaApproxBytes covers the
+        // message prefix only; the tail appendix rides inside the prompt.
+        tailAppendixTokens: tailAppendix ? Token.estimate(tailAppendix) : 0,
         rangeDesc,
       })
 
