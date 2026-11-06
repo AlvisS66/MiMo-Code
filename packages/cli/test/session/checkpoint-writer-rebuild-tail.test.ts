@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -9,9 +9,10 @@ import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Permission } from "../../src/permission"
 import { Provider } from "../../src/provider"
 import { Session } from "../../src/session"
-import { SessionCheckpoint } from "../../src/session/checkpoint"
+import { SessionCheckpoint, renderTailAppendix } from "../../src/session/checkpoint"
 import { checkpointPath } from "../../src/session/checkpoint-paths"
 import { SessionPrompt } from "../../src/session/prompt"
+import type { MessageV2 } from "../../src/session/message-v2"
 import type { MessageID, SessionID } from "../../src/session/schema"
 import { SessionTable } from "../../src/session/session.sql"
 import { Database, eq } from "../../src/storage"
@@ -120,7 +121,9 @@ function seedCheckpoint(sessionID: SessionID, watermark: MessageID) {
 describe("checkpoint writer after a rebuild", () => {
   for (const fork of [true, false])
     it.live(
-      `receives the boundary, the full tail from the database, then the live messages (fork: ${fork})`,
+      fork
+        ? "mirrors the parent window in messages and carries the tail as a prompt appendix (fork: true)"
+        : "receives the boundary, the full tail from the database, then the live messages (fork: false)",
       () =>
         Effect.gen(function* () {
           const server = startScriptedLLMServer([
@@ -182,29 +185,103 @@ describe("checkpoint writer after a rebuild", () => {
                 expect(boundary.info.id < largeStep.info.id).toBe(true)
 
                 const messages = writer!.messages.filter((message) => message.role !== "system")
-                const order = [
-                  indexOf(messages, BOUNDARY_LABEL),
-                  indexOf(messages, "run the checks on alpha and beta"),
-                  indexOf(messages, "alpha.txt body line 299"),
-                  indexOf(messages, "beta.txt body line 299"),
-                  indexOf(messages, "checks passed"),
-                  indexOf(messages, "after rebuild"),
-                  indexOf(messages, "live reply"),
-                  indexOf(messages, "produce the large step"),
-                  indexOf(messages, WRITER_MARKER),
-                ]
-                expect(order).toEqual([...order].sort((a, b) => a - b))
-                expect(new Set(order).size).toBe(order.length)
-                const outputs = stored
-                  .flatMap((message) => message.parts)
-                  .flatMap((part) =>
-                    part.type === "tool" && part.tool === "read" && part.state.status === "completed"
-                      ? [part.state.output]
-                      : [],
+                if (fork) {
+                  // fork:true — the message prefix mirrors the parent request
+                  // window: boundary + live turns only, no tail messages (the
+                  // parent request never contains the tail, so a spliced
+                  // capture would diverge from the cached prefix).
+                  const order = [
+                    indexOf(messages, BOUNDARY_LABEL),
+                    indexOf(messages, "after rebuild"),
+                    indexOf(messages, "live reply"),
+                    indexOf(messages, "produce the large step"),
+                    indexOf(messages, WRITER_MARKER),
+                  ]
+                  expect(order).toEqual([...order].sort((a, b) => a - b))
+                  expect(new Set(order).size).toBe(order.length)
+                  // Tail content must not appear as standalone MESSAGES. The
+                  // writer's own task message is excluded (its appendix
+                  // carries the tail verbatim by design), and so is the
+                  // boundary message (its synthetic text legitimately quotes
+                  // tail user input and activity verbatim).
+                  const plain = messages.filter(
+                    (message) =>
+                      !text(message).includes(WRITER_MARKER) && !text(message).includes(BOUNDARY_LABEL),
                   )
-                expect(outputs).toHaveLength(FILES.length)
-                for (const output of outputs)
-                  expect(messages.some((message) => message.role === "tool" && text(message) === output)).toBe(true)
+                  expect(plain.map((message) => text(message))).toEqual([
+                    "after rebuild",
+                    "live reply",
+                    "produce the large step",
+                  ])
+                  for (const tailOnly of [
+                    "run the checks on alpha and beta",
+                    "alpha.txt body line 299",
+                    "beta.txt body line 299",
+                    "checks passed",
+                  ])
+                    expect(plain.some((message) => text(message).includes(tailOnly))).toBe(false)
+                  // The tail rides inside the writer prompt as a serialized
+                  // appendix: verbatim user/assistant text, tool-call lines,
+                  // and the head of each read output (400-char per-item cap —
+                  // line 299 of a 300-line output is elided with a recall
+                  // marker).
+                  const appendix = text(
+                    writer!.messages.find((message) => text(message).includes(WRITER_MARKER))!,
+                  )
+                  expect(appendix).toContain("RAW CONVERSATION RECORD — REBUILD TAIL")
+                  expect(appendix).toContain("run the checks on alpha and beta")
+                  expect(appendix).toContain("checks passed")
+                  expect(appendix).toContain("alpha.txt body line 0")
+                  expect(appendix).toContain("beta.txt body line 0")
+                  expect(appendix).not.toContain("alpha.txt body line 299")
+                  expect(appendix).not.toContain("beta.txt body line 299")
+                  expect(appendix).toContain("truncated")
+                  // Prefix-cache parity, structurally: the writer's inherited
+                  // messages (everything except its trailing task message)
+                  // are entry-for-entry a prefix of the parent's request
+                  // messages — the definition of a cache hit. The parent
+                  // capture is the latest non-writer request before the
+                  // writer fired (the "next" turn, whose window saw one more
+                  // message than the writer's watermark slice).
+                  const writerIdx = server.captures.indexOf(writer!)
+                  const parentCapture = server.captures
+                    .slice(0, writerIdx)
+                    .filter((c) => !c.messages.some((m) => text(m).includes(WRITER_MARKER)))
+                    .at(-1)
+                  expect(parentCapture).toBeDefined()
+                  const writerPrefix = writer!.messages.slice(0, -1)
+                  expect(parentCapture!.messages.length).toBeGreaterThanOrEqual(writerPrefix.length)
+                  expect(writerPrefix).toEqual(parentCapture!.messages.slice(0, writerPrefix.length))
+                } else {
+                  // fork:false — cold start keeps the full-fidelity tail as
+                  // messages between the boundary and the live turns.
+                  const order = [
+                    indexOf(messages, BOUNDARY_LABEL),
+                    indexOf(messages, "run the checks on alpha and beta"),
+                    indexOf(messages, "alpha.txt body line 299"),
+                    indexOf(messages, "beta.txt body line 299"),
+                    indexOf(messages, "checks passed"),
+                    indexOf(messages, "after rebuild"),
+                    indexOf(messages, "live reply"),
+                    indexOf(messages, "produce the large step"),
+                    indexOf(messages, WRITER_MARKER),
+                  ]
+                  expect(order).toEqual([...order].sort((a, b) => a - b))
+                  expect(new Set(order).size).toBe(order.length)
+                  // The appendix is the fork:true channel only — if it ever
+                  // shows up here too, the tail is billed to the prompt twice.
+                  expect(JSON.stringify(messages)).not.toContain("RAW CONVERSATION RECORD")
+                  const outputs = stored
+                    .flatMap((message) => message.parts)
+                    .flatMap((part) =>
+                      part.type === "tool" && part.tool === "read" && part.state.status === "completed"
+                        ? [part.state.output]
+                        : [],
+                    )
+                  expect(outputs).toHaveLength(FILES.length)
+                  for (const output of outputs)
+                    expect(messages.some((message) => message.role === "tool" && text(message) === output)).toBe(true)
+                }
                 // computeBoundary still picks the large step's user message as the writer's watermark.
                 expect(JSON.stringify(messages)).not.toContain("large-reply-start")
                 // Teardown disposes the instance; let the writer finish its run first.
@@ -215,4 +292,121 @@ describe("checkpoint writer after a rebuild", () => {
         }),
       120_000,
     )
+})
+
+// --- renderTailAppendix (pure function) ---
+
+const TAIL_SID = "s_tail" as SessionID
+
+function tailMsg(id: string, role: "user" | "assistant", parts: Array<Record<string, unknown>>): MessageV2.WithParts {
+  return {
+    info: { id: id as MessageID, sessionID: TAIL_SID, role, time: { created: 0 }, agent: "build" },
+    parts,
+  } as unknown as MessageV2.WithParts
+}
+
+function tailToolPart(output: string, tool = "read"): Record<string, unknown> {
+  return {
+    type: "tool",
+    tool,
+    state: { input: { file_path: "/tmp/example" }, status: "completed", output },
+  }
+}
+
+describe("renderTailAppendix", () => {
+  const tail = (messages: MessageV2.WithParts[]) => ({ boundary: "msg_boundary" as MessageID, messages })
+
+  test("returns empty for no tail, zero budget, or empty messages", () => {
+    expect(renderTailAppendix(undefined, 25_000)).toBe("")
+    expect(renderTailAppendix(tail([tailMsg("u0", "user", [{ type: "text", text: "hi" }])]), 0)).toBe("")
+    expect(renderTailAppendix(tail([]), 25_000)).toBe("")
+  })
+
+  test("renders verbatim text, tool call + capped output with truncation marker, file placeholder", () => {
+    const out = renderTailAppendix(
+      tail([
+        tailMsg("u0", "user", [
+          { type: "text", text: "  run the checks  " },
+          { type: "file", mime: "image/png", url: "file:///tmp/example/design.png", filename: "design.png" },
+        ]),
+        tailMsg("a1", "assistant", [
+          { type: "text", text: "checks passed", synthetic: false },
+          tailToolPart(Array.from({ length: 300 }, (_, i) => `line ${i}`).join("\n")),
+        ]),
+      ]),
+      25_000,
+    )
+    expect(out).toContain("RAW CONVERSATION RECORD — REBUILD TAIL")
+    expect(out).toContain("[user | u0]")
+    expect(out).toContain("run the checks")
+    expect(out).toContain("[file: design.png]")
+    expect(out).toContain("[assistant | a1]")
+    expect(out).toContain("checks passed")
+    expect(out).toContain("tool read(")
+    expect(out).toContain("line 0")
+    expect(out).not.toContain("line 299")
+    expect(out).toContain("messageID=a1")
+    // The writer's runtime whitelist has no history tool — the truncation
+    // marker must not point at one, or the model burns a rejected call.
+    expect(out).not.toContain("history tool")
+  })
+
+  test("FIFO drops the oldest entries when the budget is hit", () => {
+    const big = (tag: string) => tailMsg(tag, "user", [{ type: "text", text: `${tag} ${"x".repeat(4_000)}` }])
+    const out = renderTailAppendix(tail([big("old1"), big("old2"), big("new1")]), 1_500)
+    expect(out).not.toContain("old1")
+    expect(out).not.toContain("old2")
+    expect(out).toContain("new1")
+    // Dropping must be announced: the header switches to "newest N of M" and
+    // an explicit marker names what was lost, so the writer never mistakes
+    // the kept suffix for the full tail range.
+    expect(out).toContain("newest 1 of 3 message(s)")
+    expect(out).toContain("2 older message(s) dropped to fit tail budget")
+  })
+
+  test("file placeholder never falls back to the url (base64 data URLs must not eat the budget)", () => {
+    // claude-import stores imported user images as file parts with a base64
+    // data url and NO filename — the placeholder must stay one short line.
+    const dataUrl = `data:image/png;base64,${"A".repeat(40_000)}`
+    const out = renderTailAppendix(
+      tail([
+        tailMsg("u0", "user", [
+          { type: "text", text: "look at this" },
+          { type: "file", mime: "image/png", url: dataUrl },
+        ]),
+      ]),
+      25_000,
+    )
+    expect(out).toContain("[file: image/png]")
+    expect(out).not.toContain("base64")
+    expect(out).toContain("look at this")
+  })
+
+  test("a single oversized newest entry is head-truncated, not dropped", () => {
+    const huge = tailMsg("u0", "user", [{ type: "text", text: "x".repeat(400_000) }])
+    const out = renderTailAppendix(tail([huge]), 1_000)
+    expect(out).toContain("RAW CONVERSATION RECORD — REBUILD TAIL")
+    expect(out).toContain("[user | u0]")
+    expect(out).toContain("head-truncated")
+    // No entries dropped (total === 1), so the header must still disclose the
+    // head truncation instead of claiming a verbatim conversation.
+    expect(out).toContain("The 1 message(s) below")
+    expect(out).toContain("the newest message is head-truncated to fit tail budget")
+    // "verbatim" would contradict the head truncation disclosed right below.
+    expect(out).not.toContain("verbatim")
+  })
+
+  test("skips synthetic text parts", () => {
+    const out = renderTailAppendix(
+      tail([
+        tailMsg("u0", "user", [
+          { type: "text", text: "harness reminder", synthetic: true },
+          { type: "text", text: "real words" },
+        ]),
+      ]),
+      25_000,
+    )
+    expect(out).not.toContain("harness reminder")
+    expect(out).toContain("real words")
+  })
 })
