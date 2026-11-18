@@ -33,6 +33,7 @@ import { SessionRevert } from "@/session/revert"
 import { SessionSummary } from "@/session/summary"
 import { SessionPrompt } from "@/session/prompt"
 import { defaultLayer as CronBridgeDefaultLayer } from "@/session/cron-bridge"
+import { defaultLayer as AutoDreamGateDefaultLayer } from "@/session/auto-dream-gate"
 import { SessionCheckpoint } from "@/session/checkpoint"
 import { Instruction } from "@/session/instruction"
 import { LLM } from "@/session/llm"
@@ -95,6 +96,7 @@ export const AppLayer = Layer.suspend(() =>
     SessionRevert.defaultLayer,
     SessionSummary.defaultLayer,
     CronBridgeDefaultLayer,
+    AutoDreamGateDefaultLayer,
     SessionCheckpoint.defaultLayer,
     Instruction.defaultLayer,
     LLM.defaultLayer,

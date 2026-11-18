@@ -343,10 +343,11 @@ const InfoSchema = Schema.Struct({
     Schema.Struct({
       auto: Schema.optional(Schema.Boolean).annotate({
         description:
-          "Auto-trigger dream memory consolidation on new session start. Default: false.",
+          "Auto-trigger dream memory consolidation when the session sits idle. Default: false.",
       }),
       interval_days: Schema.optional(NonNegativeInt).annotate({
-        description: "Minimum days between automatic dream runs. Set to 0 to trigger on every new session. Default: 7.",
+        description:
+          "Minimum days between automatic dream runs. Set to 0 to run on every idle period: paired with the 5 minute idle debounce this makes a consolidation pass start as soon as each idle window is reached, so the project runs continuously. Default: 7.",
       }),
     }),
   ),
@@ -354,10 +355,11 @@ const InfoSchema = Schema.Struct({
     Schema.Struct({
       auto: Schema.optional(Schema.Boolean).annotate({
         description:
-          "Auto-trigger distill workflow packaging on new session start. Default: false.",
+          "Auto-trigger distill workflow packaging when the session sits idle. Default: false.",
       }),
       interval_days: Schema.optional(NonNegativeInt).annotate({
-        description: "Minimum days between automatic distill runs. Default: 30.",
+        description:
+          "Minimum days between automatic distill runs. Set to 0 to run on every idle period: paired with the 5 minute idle debounce this makes a distill pass start as soon as each idle window is reached, so the project runs continuously. Default: 30.",
       }),
     }),
   ),
