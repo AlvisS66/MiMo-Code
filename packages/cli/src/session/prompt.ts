@@ -180,7 +180,7 @@ import { Metrics } from "@/metrics"
 import { ToolResultError } from "../tool/result-error"
 import { errorMessage } from "../util/error"
 import { RecoverableError } from "../tool/recoverable"
-import { shouldAutoDream, shouldAutoDistill, DREAM_TASK, DISTILL_TASK, AUTO_DREAM_TITLE, AUTO_DISTILL_TITLE } from "./auto-dream"
+import { AutoDreamGate, defaultLayer as AutoDreamGateDefaultLayer } from "./auto-dream-gate"
 import {
   createMcpToolSearchCatalog,
   mcpReminderMarker,
@@ -668,6 +668,7 @@ export const layer = Layer.effect(
     const bus = yield* Bus.Service
     const status = yield* SessionStatus.Service
     const cronBridge = yield* CronBridge
+    const autoDreamGate = yield* AutoDreamGate.Service
     const sessions = yield* Session.Service
     const agents = yield* Agent.Service
     const provider = yield* Provider.Service
@@ -5417,40 +5418,42 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           yield* actorRegistry.updateTurn(sessionID, resolvedAgentID).pipe(Effect.ignore)
 
           if (step === 1 && !session.parentID) {
-            const cfg = yield* config.get()
-            const dreamTrigger = yield* shouldAutoDream(cfg).pipe(Effect.catch(() => Effect.succeed(false)))
-            const distillTrigger = yield* shouldAutoDistill(cfg).pipe(Effect.catch(() => Effect.succeed(false)))
-            const mdl = { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID }
-            // AppRuntime is imported dynamically (not at module top level) to keep
-            // the session layer out of the app-runtime module-init cycle
-            // (prompt → app-runtime → AppLayer → SessionPrompt). Only loaded when a
-            // trigger actually fires. Detached fire-and-forget on the full runtime.
-            const needAppRuntime = dreamTrigger || distillTrigger
-            if (needAppRuntime) {
-              const { AppRuntime } = yield* Effect.promise(() => import("@/effect/app-runtime"))
-              if (dreamTrigger) {
-                AppRuntime.runPromise(
-                  Session.Service.use((svc) =>
-                    Effect.gen(function* () {
-                      const s = yield* svc.create({ title: AUTO_DREAM_TITLE })
-                      const sp = yield* Service
-                      yield* sp.prompt({ sessionID: s.id, agent: "dream", model: mdl, source: "hook", parts: [{ type: "text", text: DREAM_TASK }] })
-                    }),
-                  ),
-                ).catch((err) => log.error("auto-dream prompt failed", { error: String(err) }))
-              }
-              if (distillTrigger) {
-                AppRuntime.runPromise(
-                  Session.Service.use((svc) =>
-                    Effect.gen(function* () {
-                      const s = yield* svc.create({ title: AUTO_DISTILL_TITLE })
-                      const sp = yield* Service
-                      yield* sp.prompt({ sessionID: s.id, agent: "distill", model: mdl, source: "hook", parts: [{ type: "text", text: DISTILL_TASK }] })
-                    }),
-                  ),
-                ).catch((err) => log.error("auto-distill prompt failed", { error: String(err) }))
-              }
-            }
+            // Auto dream / distill now start from the idle gate, not from this
+            // step: the gate waits until nothing has run for IDLE_DEBOUNCE_MS and
+            // spawns the run itself, with no model override so the create path
+            // resolves `agent.dream.model` → provider default.
+            yield* autoDreamGate
+              .arm((input) =>
+                Effect.gen(function* () {
+                  const created = yield* sessions.create({ title: input.title })
+                  // Session.create binds to the instance context, not to the caller's
+                  // project: a gate parked by another directory must not write this
+                  // project's consolidation into a foreign session.
+                  if (created.projectID !== input.projectID) {
+                    yield* slog.warn("auto session created in another project — abandoning", {
+                      expected: input.projectID,
+                      actual: created.projectID,
+                    })
+                    return
+                  }
+                  yield* impl.prompt({
+                    sessionID: created.id,
+                    agent: input.agent,
+                    source: "hook",
+                    parts: [{ type: "text", text: input.task }],
+                  })
+                }),
+              )
+              // Arming is a side concern of the turn: a defect in the gate must not
+              // fail the user's prompt, and must not be silent either.
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.sync(() => {
+                    if (!Cause.hasInterruptsOnly(cause))
+                      slog.error("auto dream gate arm failed", { error: Cause.pretty(cause) })
+                  }),
+                ),
+              )
             if (Flag.MIMOCODE_EXPERIMENTAL_CRON) {
               const workspaceRoot = (yield* InstanceState.context).worktree
               yield* cronBridge.start(
@@ -7797,7 +7800,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     yield* bindScopedRef(defaultModelRef, defaultModelResolver)
     return impl
   }),
-).pipe(Layer.provide(ActorExecution.layer))
+).pipe(Layer.provide(ActorExecution.layer), Layer.provide(AutoDreamGateDefaultLayer))
 
 /** App composition variant with MCP supplied by the process-wide layer. */
 export const appLayer = Layer.suspend(() =>

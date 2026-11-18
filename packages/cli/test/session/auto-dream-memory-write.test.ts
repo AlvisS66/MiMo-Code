@@ -6,7 +6,9 @@ import { Config } from "../../src/config"
 import { AutoDream } from "../../src/session/auto-dream"
 import { Session as SessionNs } from "../../src/session"
 import { SessionTable } from "../../src/session/session.sql"
+import { ProjectID } from "../../src/project/schema"
 import { Database } from "../../src/storage"
+import { InstanceState } from "../../src/effect"
 import { Log } from "../../src/util"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -19,6 +21,8 @@ const it = testEffect(
 )
 
 const DAY_MS = 24 * 60 * 60 * 1000
+
+const currentProjectID = Effect.map(InstanceState.context, (ctx) => ctx.project.id)
 
 // Both auto-runs refuse to fire on a project younger than their interval, so a
 // backdated top-level session is what makes these cases non-vacuous: the interval
@@ -43,15 +47,12 @@ const seedOldProject = Effect.fn("seedOldProject")(function* () {
 // auto-produces artifacts in the background. Neither may run while memory writing
 // is off.
 //
-// Only the DISABLED direction is asserted here, and deliberately so: the enabled
-// direction additionally passes through a module-level 10s spawn throttle
-// (lastDreamSpawnTime / lastDistillSpawnTime) that is process-global and armed by
-// any other test file whose session-create path evaluates these same predicates.
-// An "enabled → true" control is therefore order-dependent across files. The
-// enabled polarity is pinned instead by test/config/memory-disable-write.test.ts
-// (accessor level, where `disable_write: false` and an absent field both mean
-// enabled). The switch check is the first statement in both functions, so the
-// assertions below hold regardless of throttle state.
+// The switch is the first statement of the decision chain, ahead of the
+// non-git ("global") short circuit, so these four hold regardless of the project
+// id they pass. They run in a directory outside git, which means the id is
+// `global` — a project the chain would reject one step later anyway. The
+// non-git short circuit itself is covered by the "real project" case below,
+// which the switch cannot be masking.
 describe("shouldAutoDream × memory write switch", () => {
   it.live(
     "disable_write: true → no auto dream, even on a project old enough to be due",
@@ -60,7 +61,7 @@ describe("shouldAutoDream × memory write switch", () => {
         Effect.gen(function* () {
           yield* seedOldProject()
           const cfg = yield* (yield* Config.Service).get()
-          expect(yield* AutoDream.shouldAutoDream(cfg)).toBe(false)
+          expect(yield* AutoDream.shouldAutoDream(cfg, yield* currentProjectID)).toBe(false)
         }),
       { outsideGit: true, config: { memory: { disable_write: true } } },
     ),
@@ -75,9 +76,26 @@ describe("shouldAutoDream × memory write switch", () => {
         Effect.gen(function* () {
           yield* seedOldProject()
           const cfg = yield* (yield* Config.Service).get()
-          expect(yield* AutoDream.shouldAutoDream(cfg)).toBe(false)
+          expect(yield* AutoDream.shouldAutoDream(cfg, yield* currentProjectID)).toBe(false)
         }),
       { outsideGit: true, config: { dream: { auto: true }, memory: { disable_write: true } } },
+    ),
+  )
+
+  // Same switch, but inside a git repository: here the id is a real project, so
+  // `false` cannot come from the non-git short circuit — it is the switch.
+  it.live(
+    "disable_write: true → false for a real project too",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          yield* seedOldProject()
+          const cfg = yield* (yield* Config.Service).get()
+          const projectID = yield* currentProjectID
+          expect(projectID).not.toBe(ProjectID.global)
+          expect(yield* AutoDream.shouldAutoDream(cfg, projectID)).toBe(false)
+        }),
+      { git: true, config: { dream: { auto: true }, memory: { disable_write: true } } },
     ),
   )
 })
@@ -90,7 +108,7 @@ describe("shouldAutoDistill × memory write switch", () => {
         Effect.gen(function* () {
           yield* seedOldProject()
           const cfg = yield* (yield* Config.Service).get()
-          expect(yield* AutoDream.shouldAutoDistill(cfg)).toBe(false)
+          expect(yield* AutoDream.shouldAutoDistill(cfg, yield* currentProjectID)).toBe(false)
         }),
       { outsideGit: true, config: { memory: { disable_write: true } } },
     ),
@@ -103,9 +121,27 @@ describe("shouldAutoDistill × memory write switch", () => {
         Effect.gen(function* () {
           yield* seedOldProject()
           const cfg = yield* (yield* Config.Service).get()
-          expect(yield* AutoDream.shouldAutoDistill(cfg)).toBe(false)
+          expect(yield* AutoDream.shouldAutoDistill(cfg, yield* currentProjectID)).toBe(false)
         }),
       { outsideGit: true, config: { distill: { auto: true }, memory: { disable_write: true } } },
+    ),
+  )
+})
+
+// The enabled polarity used to be unpinnable here: a process-global spawn
+// throttle sat in front of the interval check, so the result depended on which
+// other test file had run first. The throttle now lives in the idle gate's
+// instance state, which makes "due → true" deterministic.
+describe("auto-run decision chain (enabled)", () => {
+  it.live("a real project that is due fires", () =>
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          yield* seedOldProject()
+          const cfg = yield* (yield* Config.Service).get()
+          expect(yield* AutoDream.shouldAutoDream(cfg, yield* currentProjectID)).toBe(true)
+        }),
+      { git: true, config: { dream: { auto: true } } },
     ),
   )
 })
