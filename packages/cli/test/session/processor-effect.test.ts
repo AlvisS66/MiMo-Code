@@ -235,6 +235,27 @@ it.live("execution proof precedes effects, rejects duplicate execution, and surv
   }), { git: true, config: (url) => providerCfg(url) }),
 )
 
+it.live("a non-object tool input is stored as {} instead of failing the part write", () =>
+  provideTmpdirServer(({ dir }) => Effect.gen(function* () {
+    const { processors, session, provider } = yield* boot()
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "scalar args")
+    const message = yield* assistant(chat.id, parent.id, dir)
+    const model = yield* provider.getModel(ref.providerID, ref.modelID)
+    const handle = yield* processors.create({ assistantMessage: message, sessionID: chat.id, model })
+    handle.registerTool("write")
+    // A provider can hand the SDK arguments that parse to a number; the declared
+    // record type is the trusted-input contract, not what always arrives.
+    yield* handle.replay({
+      toolCalls: [{ toolName: "write", toolCallId: "scalar", input: JSON.parse("60") }],
+      finishReason: "tool-calls", messages: [],
+      tools: { write: { execute: async () => ({ title: "", output: "ok", metadata: {} }) } },
+    })
+    const part = MessageV2.parts(message.id).find((item) => item.type === "tool")!
+    expect(part.state).toMatchObject({ status: "completed", input: {} })
+  }), { git: true, config: (url) => providerCfg(url) }),
+)
+
 // [TP-SR-R21-32]
 it.live("closing a processor cancels execution awaiting input and missing persistence prevents effects", () =>
   provideTmpdirServer(({ dir }) => Effect.gen(function* () {

@@ -662,7 +662,7 @@ export const layer: Layer.Layer<
                 !match.metadata?.providerExecuted && !value.providerExecuted ? "not-started" : undefined),
               state: match.state.status !== "pending" ? match.state : {
                 status: "running",
-                input: value.input,
+                input: isRecord(value.input) ? value.input : {},
                 time: { start: Date.now() },
               },
               metadata: match.metadata?.providerExecuted || value.providerExecuted

@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import {
   canonical,
+  invalidInputError,
+  invalidToolCall,
   normalizeInput,
   parseToolInput,
   repairToolCall,
@@ -131,6 +133,50 @@ describe("util.tool-compat", () => {
 
       const payload = { someField: "value" }
       expect(normalizeInput({ payload }, schema)).toEqual({ payload })
+    })
+  })
+
+  describe("invalidInputError", () => {
+    const decide = (toolName: string, input: unknown) => invalidInputError({ toolName, input })
+
+    test("leaves object, empty and unparsable arguments to the SDK", () => {
+      expect(decide("read", { file_path: "/tmp/a.ts" })).toBeUndefined()
+      expect(decide("read", "")).toBeUndefined()
+      expect(decide("read", "  ")).toBeUndefined()
+      expect(decide("read", '{"file_path": "/tmp/a')).toBeUndefined()
+    })
+
+    test("never reports a provider-executed or dynamic call", () => {
+      expect(invalidInputError({ toolName: "actor", input: "60", providerExecuted: true })).toBeUndefined()
+      expect(invalidInputError({ toolName: "actor", input: "60", dynamic: true })).toBeUndefined()
+    })
+
+    test("reports arguments that parse to a non-object", () => {
+      for (const input of ["60", "true", "null", "[1,2]"]) {
+        expect(decide("actor", input)).toContain(`actor was called with ${input} as its arguments`)
+      }
+      expect(decide("read", JSON.stringify("/tmp/a.ts"))).toContain(
+        `read was called with "/tmp/a.ts" as its arguments`,
+      )
+      expect(decide("exec", JSON.stringify("pwd"))).toContain(
+        `exec was called with "pwd" as its arguments`,
+      )
+    })
+
+    test("reports a non-string input and caps the shown value", () => {
+      expect(decide("actor", 60)).toContain("actor was called with 60 as its arguments")
+      expect(decide("actor", null)).toContain("actor was called with null as its arguments")
+      const long = JSON.stringify(Array.from({ length: 60 }, (_, index) => index))
+      expect(decide("actor", long)).toContain("...")
+    })
+  })
+
+  describe("invalidToolCall", () => {
+    test("carries the tool name and the reason as the invalid tool input", () => {
+      expect(invalidToolCall("actor", "bad arguments")).toEqual({
+        toolName: "invalid",
+        input: JSON.stringify({ tool: "actor", error: "bad arguments" }),
+      })
     })
   })
 

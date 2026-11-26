@@ -179,6 +179,20 @@ export function toolCallsResponse(
 }
 
 /**
+ * Build SSE lines for one tool call whose arguments stream as separate deltas,
+ * the way a gateway forwards large arguments token by token.
+ */
+export function toolArgFramesResponse(call: { id: string; name: string; argFrames: string[] }): string[] {
+  return [
+    sseChunk({ role: "assistant" }),
+    sseChunk({ tool_calls: [{ index: 0, id: call.id, type: "function", function: { name: call.name, arguments: "" } }] }),
+    ...call.argFrames.map((frame) => sseChunk({ tool_calls: [{ index: 0, function: { arguments: frame } }] })),
+    sseChunk({}, "tool_calls"),
+    "data: [DONE]\n\n",
+  ]
+}
+
+/**
  * Build SSE lines for a complete tool call that finishes with
  * `finish_reason: "length"` (provider emits a full client tool call, then caps
  * the step on output tokens). Exercises the T05 "length + tool" contract:

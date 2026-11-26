@@ -730,16 +730,15 @@ const live: Layer.Layer<
           }
           return {
             ...failed.toolCall,
-            input: JSON.stringify({
-              tool: failed.toolCall.toolName,
-              error: NoSuchToolError.isInstance(failed.error)
+            ...ToolCompat.invalidToolCall(
+              failed.toolCall.toolName,
+              NoSuchToolError.isInstance(failed.error)
                 ? new NoSuchToolError({
                     toolName: failed.toolCall.toolName,
                     availableTools: activeTools,
                   }).message
                 : failed.error.message,
-            }),
-            toolName: "invalid",
+            ),
           }
         },
         temperature: params.temperature,
@@ -819,6 +818,23 @@ const live: Layer.Layer<
                             : bindHostError(next.value.error, { providerID: input.model.providerID })
                           controller.enqueue({ ...next.value, error })
                           return
+                        }
+                        // The SDK accepts arguments that parse to a scalar (tool schemas
+                        // carry no validate); report them through the invalid tool instead.
+                        if (next.value.type === "tool-call") {
+                          const reason = ToolCompat.invalidInputError(next.value)
+                          if (reason) {
+                            l.info("invalid tool arguments", {
+                              messageID: input.user.id,
+                              tool: next.value.toolName,
+                              reason,
+                            })
+                            controller.enqueue({
+                              ...next.value,
+                              ...ToolCompat.invalidToolCall(next.value.toolName, reason),
+                            })
+                            return
+                          }
                         }
                         controller.enqueue(next.value)
                         return

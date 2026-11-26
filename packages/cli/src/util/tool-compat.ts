@@ -1,4 +1,4 @@
-import type { JSONSchema7 } from "@ai-sdk/provider"
+import type { JSONSchema7, LanguageModelV3ToolCall } from "@ai-sdk/provider"
 import { isRecord } from "./record"
 
 /**
@@ -212,4 +212,62 @@ export async function repairToolCall(input: RepairToolCallInput): Promise<Repair
     toolName: input.toolName,
     input: repairedInput,
   }
+}
+
+/**
+ * The fields of a provider `tool-call` part that the argument check reads. The
+ * flags are picked from the SDK type so that a renamed flag fails typecheck
+ * instead of silently disabling the skip. `input` stays `unknown` because the
+ * guard exists for providers that break the string contract.
+ */
+export type ProviderToolCall = Pick<LanguageModelV3ToolCall, "toolName" | "providerExecuted" | "dynamic"> & {
+  input: unknown
+}
+
+/**
+ * Why a tool call's arguments cannot be used, or undefined when the SDK should
+ * handle the call itself.
+ *
+ * Tool schemas carry no `validate`, so arguments that parse to a scalar (a
+ * gateway can truncate a streamed argument stream down to a bare number) would
+ * be accepted as-is and fail the whole turn at the stored-part schema.
+ *
+ * Calls the provider executed itself and dynamic calls are left alone: the
+ * provider pairs its own tool results with the original tool name. Unparsable
+ * text is left alone too, because only then does the SDK raise
+ * InvalidToolInputError and give `repairToolCall` its chance (unicode escapes,
+ * key aliases, the exec raw-source wrap). A JSON string literal parses, so it
+ * is not exec raw source and gets reported like any other tool. An empty
+ * string is a no-argument call, which the SDK maps to {}.
+ */
+export function invalidInputError(toolCall: ProviderToolCall): string | undefined {
+  if (toolCall.providerExecuted || toolCall.dynamic) return undefined
+  const { toolName, input } = toolCall
+  if (isRecord(input)) return undefined
+  if (typeof input !== "string") return describeArguments(toolName, input)
+  if (input.trim() === "") return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(input)
+  } catch {
+    return undefined
+  }
+  if (isRecord(parsed)) return undefined
+  return describeArguments(toolName, parsed)
+}
+
+export type InvalidToolCall = {
+  toolName: "invalid"
+  input: string
+}
+
+/** Shape of the call that reports unusable arguments through the `invalid` tool. */
+export function invalidToolCall(tool: string, error: string): InvalidToolCall {
+  return { toolName: "invalid", input: JSON.stringify({ tool, error }) }
+}
+
+function describeArguments(toolName: string, value: unknown): string {
+  const json = JSON.stringify(value) ?? String(value)
+  const shown = json.length > 120 ? json.slice(0, 117) + "..." : json
+  return `${toolName} was called with ${shown} as its arguments instead of a JSON object; the call was not executed`
 }

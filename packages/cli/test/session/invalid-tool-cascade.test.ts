@@ -10,7 +10,12 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { MessageV2 } from "../../src/session/message-v2"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
-import { startScriptedLLMServer, textStopResponse, toolCallsResponse } from "../lib/scripted-llm-server"
+import {
+  startScriptedLLMServer,
+  textStopResponse,
+  toolArgFramesResponse,
+  toolCallsResponse,
+} from "../lib/scripted-llm-server"
 
 const it = testEffect(
   Layer.mergeAll(
@@ -274,6 +279,51 @@ it.live(
             expect(continuation).toContain("cancelled-tail")
             expect(continuation).toContain(cancelled)
             expect(result.parts.some((part) => part.type === "text" && part.text === "Recovered")).toBe(true)
+          }),
+        { git: true, config: config(server.origin) },
+      )
+    }),
+  30000,
+)
+
+it.live(
+  "truncated numeric tool arguments become a recoverable invalid call instead of failing the turn",
+  () =>
+    Effect.gen(function* () {
+      // "2" and "60" each parse on their own and "}" does not, so the accumulated arguments
+      // are broken and the provider flushes the last delta that parsed ("60") as the input.
+      // The tool must be a registered one: an unknown name is routed to `invalid` regardless
+      // of the arguments, which would hide the case this test is about.
+      const server = startScriptedLLMServer([
+        { lines: toolArgFramesResponse({ id: "scalar-args", name: "write", argFrames: ["2", "60", "}"] }) },
+        { lines: textStopResponse("Recovered") },
+      ])
+      yield* Effect.addFinalizer(() => Effect.promise(() => server.stop()))
+      yield* provideTmpdirInstance(
+        () =>
+          Effect.gen(function* () {
+            const sessions = yield* Session.Service
+            const prompt = yield* SessionPrompt.Service
+            const session = yield* sessions.create({ title: "Scalar tool arguments" })
+            const result = yield* prompt.prompt({
+              sessionID: session.id,
+              agent: "build",
+              harness: "default",
+              parts: [{ type: "text", text: "Run the requested tool" }],
+            })
+            const bad = (yield* sessions.messages({ sessionID: session.id }))
+              .flatMap((message) => message.parts)
+              .filter((part) => part.type === "tool")
+              .find((part) => part.callID === "scalar-args")!
+            expect(bad.tool).toBe("invalid")
+            if (bad.state.status !== "error") throw new Error(`expected an error part, got ${bad.state.status}`)
+            expect(bad.state.input.tool).toBe("write")
+            expect(bad.state.error).toContain("write")
+            expect(bad.state.metadata?.recoverable).toBe(true)
+            expect(result.info.role === "assistant" && result.info.error).toBeUndefined()
+            expect(result.parts.some((part) => part.type === "text" && part.text === "Recovered")).toBe(true)
+            expect(server.captures).toHaveLength(2)
+            expect(JSON.stringify(server.captures[1].messages)).toContain("scalar-args")
           }),
         { git: true, config: config(server.origin) },
       )
